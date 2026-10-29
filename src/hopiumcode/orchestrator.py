@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -268,15 +269,118 @@ class Agent:
                       steps=model_calls, latency_s=latency)
 
 
+# --------------------------------------------------------------------------- мягкий откат на заглушки
+
+_FALLBACKS: dict[str, str] = {}  # модуль -> текст предупреждения
+
+
+def warn_fallback(module: str, ex: NotImplementedError, stub: str) -> None:
+    """Один раз на модуль: предупреждение в stderr, что модуль ещё не готов и работает заглушка."""
+    if module in _FALLBACKS:
+        return
+    owner = str(ex) or "владелец не указан"
+    msg = f"⚠ {module} ещё не реализован ({owner}), используется заглушка {stub}"
+    _FALLBACKS[module] = msg
+    print(msg, file=sys.stderr)
+    _event("fallback", module=module, owner=owner, stub=stub)
+
+
+def fallback_warnings() -> list[str]:
+    return list(_FALLBACKS.values())
+
+
+def retrieve_with_fallback(real: Callable[[str, int, str], list[Hit]],
+                           stub: Callable[[str, int, str], list[Hit]],
+                           module: str = "retrieval.hybrid.retrieve",
+                           stub_name: str = "stubs.stub_retrieve") -> Callable[[str, int, str], list[Hit]]:
+    """Настоящий ретривер; после первого NotImplementedError навсегда переключается на заглушку."""
+    use_stub = False
+
+    def retrieve(question: str, k: int = 8, mode: str = "hybrid") -> list[Hit]:
+        nonlocal use_stub
+        if not use_stub:
+            try:
+                return real(question, k, mode)
+            except NotImplementedError as ex:
+                warn_fallback(module, ex, stub_name)
+                use_stub = True
+        return stub(question, k, mode)
+
+    return retrieve
+
+
+class ToolsWithFallback:
+    """Клиент инструментов (ToolClientLike) с откатом: пока настоящий не реализован, работает заглушка.
+
+    Настоящий клиент запускается при первом обращении, поэтому Agent не обязан вызывать start().
+    """
+
+    def __init__(self, real, stub, module: str = "mcp_client.McpClient",
+                 stub_name: str = "stubs.StubTools") -> None:
+        self._real, self._stub = real, stub
+        self._module, self._stub_name = module, stub_name
+        self._active = None
+
+    def _switch_to_stub(self, ex: NotImplementedError):
+        warn_fallback(self._module, ex, self._stub_name)
+        self._stub.start()
+        self._active = self._stub
+        return self._stub
+
+    def _tools(self):
+        if self._active is None:
+            try:
+                self._real.start()
+                self._active = self._real
+            except NotImplementedError as ex:
+                self._switch_to_stub(ex)
+        return self._active
+
+    def _call(self, method: str, *args):
+        tools = self._tools()
+        try:
+            return getattr(tools, method)(*args)
+        except NotImplementedError as ex:
+            if tools is self._stub:
+                raise
+            return getattr(self._switch_to_stub(ex), method)(*args)
+
+    def start(self) -> None:
+        self._tools()
+
+    def list_tools_for_ollama(self) -> list[dict]:
+        return self._call("list_tools_for_ollama")
+
+    def call_tool(self, name: str, args: dict) -> str:
+        return self._call("call_tool", name, args)
+
+    def close(self) -> None:
+        if self._active is not None:
+            try:
+                self._active.close()
+            except NotImplementedError:
+                pass
+            self._active = None
+
+
 # --------------------------------------------------------------------------- сборка по умолчанию
 
 def build_default_agent(config: Config | None = None) -> Agent:
-    """Настоящие реализации: Ollama + retrieve (участник 3) + MCP-клиент (участник 4)."""
+    """Ollama + retrieve (участник 3) + MCP-клиент (участник 4); пока модуль не готов, работает его заглушка."""
     cfg = config or Config.from_env()
     from .mcp_client import McpClient
     from .retrieval.hybrid import retrieve
+    from .stubs import StubTools, stub_retrieve
 
-    return Agent(OllamaChat(cfg.llm_model, cfg.ollama_url), retrieve, McpClient(), cfg)
+    return Agent(OllamaChat(cfg.llm_model, cfg.ollama_url), retrieve_with_fallback(retrieve, stub_retrieve),
+                 ToolsWithFallback(McpClient(), StubTools()), cfg)
+
+
+def build_fake_agent(config: Config | None = None) -> Agent:
+    """Всё на заглушках и без Ollama: режим --fake и тесты."""
+    from .stubs import ScriptedChat, StubTools, stub_retrieve
+
+    return Agent(ScriptedChat(), stub_retrieve, StubTools(), config or Config.from_env())
 
 
 def answer(question: str, mode: str = "hybrid") -> Answer:

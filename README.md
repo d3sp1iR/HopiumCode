@@ -10,16 +10,34 @@
 ## Быстрый старт
 
 ```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-cp .env.example .env
-ollama pull qwen3:8b && ollama pull nomic-embed-text    # модели можно менять в .env
-git clone <URL репозитория-цели> data/repo               # выбирается на этапе Э0
-make index          # индексация (участники 2 и 3)
-make ask Q="Где обрабатывается ошибка подключения?"
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"   # Windows: .venv\Scripts\pip
+ollama pull qwen3:8b && ollama pull nomic-embed-text         # другая модель: CG_LLM_MODEL=qwen3:4b
+make fetch                                  # клон Flask 3.1.3 в data/repo/flask
+make index                                  # индекс по data/repo/flask/src/flask
+make ask Q="Где создаётся сессия?"          # флаги: ARGS="--mode vector" или ARGS="--fake"
+make eval ARGS="--fake"                     # прогон eval/questions.yaml без Ollama
 make test
-make eval           # сравнение режимов поиска (участник 5)
 ```
+
+Make-цели сами берут `.venv/bin/python`, активировать venv не нужно (другой интерпретатор: `make test PYTHON=python3`).
+Настройки читаются из переменных окружения `CG_*` (список в `.env.example`). Файл `.env` автоматически
+не загружается: `set -a; source .env; set +a` перед `make`.
+
+| Шаг | Что работает сейчас | Заглушка, пока модуль не готов |
+|---|---|---|
+| `make fetch` | полностью | нет |
+| `make index` | проверка, что Flask склонирован | `indexing.build.build_all` (участники 2 и 3) → `stubs.stub_build_all`: индекс не строится, только считаются .py-файлы |
+| `make ask` | Ollama, промпт, цикл инструментов, проверка ссылок | `retrieval.hybrid.retrieve` (участник 3) → `stubs.stub_retrieve` с демо-фрагментами не из Flask; `mcp_client.McpClient` (участник 4) → `stubs.StubTools` |
+| `make ask ARGS=--fake` | цепочка целиком без Ollama | всё: `ScriptedChat`, `stub_retrieve`, `StubTools` |
+| `make eval` | метрики, таблица, JSON в `eval/results/` | те же, что у `make ask`; с `--fake` метрики проверяют цепочку, а не качество |
+
+При откате в stderr печатается предупреждение вида `⚠ retrieval.hybrid.retrieve ещё не реализован (участник 3),
+используется заглушка stubs.stub_retrieve`. Когда модуль участника перестаёт бросать `NotImplementedError`,
+цепочка сама переходит на него, менять код интеграции не нужно.
+
+Оценка: `make eval ARGS="--mode vector+bm25 --only q01,q05"`. Метрики на вопрос: `hit_files` (доля
+`expected_files` среди найденных фрагментов и подтверждённых ссылок), `citations_verified`, `answered`
+(для `trap`: честное «не нашёл» без ссылок), время и число вызовов инструментов; итоги по типам вопросов.
 
 ## Структура
 
@@ -33,4 +51,4 @@ make eval           # сравнение режимов поиска (участ
 | `eval/`, `tests/`, `docs/` | Оценка, тесты, документация | Участник 5 |
 | `data/` | Репозиторий-цель и индексы (не коммитятся) | все |
 
-Статус модулей: пока везде заглушки (`NotImplementedError`) с указанием владельца. Контракты зафиксированы в `src/hopiumcode/models.py` и `interfaces.py`.
+Статус модулей: индексация, ретривер, граф и MCP пока заглушки (`NotImplementedError`) с указанием владельца; оркестратор, CLI и оценка работают (см. таблицу выше). Контракты зафиксированы в `src/hopiumcode/models.py` и `interfaces.py`.

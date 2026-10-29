@@ -10,7 +10,7 @@ class Config:
     llm_model: str = "qwen3:8b"
     embed_model: str = "nomic-embed-text"
     ollama_url: str = "http://localhost:11434"
-    repo_root: Path = Path("data/repo")
+    repo_root: Path = Path("data/repo/flask/src/flask")  # индексируется только src/flask (make fetch)
     index_dir: Path = Path("data/index")
     graph_dir: Path = Path("data/graph")
     top_k: int = 8

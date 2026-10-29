@@ -4,6 +4,8 @@ StubRetrieve, StubTools и ScriptedChat повторяют контракты н
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from .models import Chunk, Hit
 from .orchestrator import ModelReply, ToolCall
 
@@ -54,3 +56,10 @@ class ScriptedChat:
         if first_ref:
             return ModelReply(f"(заглушка) Ответ по найденному фрагменту [{first_ref}].")
         return ModelReply("В найденном контексте ответа нет.")
+
+
+def stub_build_all(root: Path) -> int:
+    """Заглушка indexing.build.build_all: индекс не строит, только считает .py-файлы, которые попадут в индекс."""
+    n = sum(1 for p in root.rglob("*.py") if "__pycache__" not in p.parts)
+    print(f"(заглушка) индекс не построен; в {root} найдено .py-файлов для индексации: {n}")
+    return n

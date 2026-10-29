@@ -1,7 +1,344 @@
-# 30 вопросов с эталоном. Эталон проверяется ВРУЧНУЮ по коду. Владелец: участник 5.
-# category: semantic | graph | explain | history
+# Демо-вопросы с эталоном по Flask 3.1.3 (data/repo/flask). Эталон проверен ВРУЧНУЮ по коду
+# (чтение файла / grep / git log / git blame). Владелец: участник 5.
+#
+# Поля:
+#   id                уникальный идентификатор
+#   question          вопрос пользователя
+#   type              semantic | graph | history | overview | trap
+#   expected_files    файлы, где лежит ответ (пути относительно data/repo/flask)
+#   expected_symbols  qualified_name символов, которые должны найтись (может быть пустым)
+#   expected_ranges   "путь:начало-конец" (как ссылка в ответе агента), строки включительно
+#   expected_commits  (только history) короткие хэши коммитов из data/repo/flask
+#   reference_answer  эталонный ответ, 2-3 предложения
+#   notes             чем проверено и на что смотреть при оценке
+#
+# Старый формат (category, gold_files, gold_answer) тоже читается: см. eval/run_eval.py::load_questions.
+
+# --- semantic -------------------------------------------------------------------------------
 - id: q01
-  category: semantic
-  question: "Где в проекте обрабатывается ошибка подключения?"
-  gold_files: []          # пути, где лежит ответ
-  gold_answer: ""         # краткий верный ответ
+  type: semantic
+  question: "Как Flask обрабатывает исключение, которое возникло во view-функции во время запроса?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/sansio/app.py
+  expected_symbols:
+    - Flask.full_dispatch_request
+    - Flask.handle_user_exception
+    - Flask.handle_http_exception
+    - Flask.handle_exception
+    - App._find_error_handler
+  expected_ranges:
+    - src/flask/app.py:904-920
+    - src/flask/app.py:779-809
+    - src/flask/app.py:744-777
+    - src/flask/app.py:811-862
+    - src/flask/sansio/app.py:823-846
+  reference_answer: >-
+    full_dispatch_request ловит любое Exception из before_request/view и передаёт его в
+    handle_user_exception, которая отдаёт HTTPException в handle_http_exception, а для прочих
+    ищет обработчик через _find_error_handler (сначала blueprint, потом app, по коду и по MRO);
+    если обработчика нет, исключение пробрасывается выше. Необработанное исключение ловит
+    wsgi_app и вызывает handle_exception: она шлёт сигнал got_request_exception, при
+    PROPAGATE_EXCEPTIONS (или debug/testing) пробрасывает ошибку, иначе логирует её и
+    возвращает InternalServerError (500) через обработчик 500, если он зарегистрирован.
+  notes: "Проверено чтением app.py:744-920 и sansio/app.py:823-846. Вызов handle_exception: app.py:1514."
+
+- id: q02
+  type: semantic
+  question: "Как работает маршрутизация во Flask: как URL сопоставляется с view-функцией?"
+  expected_files:
+    - src/flask/sansio/scaffold.py
+    - src/flask/sansio/app.py
+    - src/flask/app.py
+    - src/flask/ctx.py
+  expected_symbols:
+    - Scaffold.route
+    - App.add_url_rule
+    - Flask.create_url_adapter
+    - RequestContext.match_request
+    - Flask.dispatch_request
+  expected_ranges:
+    - src/flask/sansio/scaffold.py:336-365
+    - src/flask/sansio/app.py:605-661
+    - src/flask/app.py:425-476
+    - src/flask/ctx.py:357-365
+    - src/flask/app.py:879-902
+  reference_answer: >-
+    Декоратор @route вызывает add_url_rule, которая создаёт werkzeug Rule с методами, добавляет
+    его в app.url_map и кладёт функцию в view_functions[endpoint]. При запросе RequestContext
+    получает MapAdapter через create_url_adapter (bind_to_environ), а match_request записывает
+    в request найденные url_rule и view_args (или routing_exception). dispatch_request берёт
+    view_functions[rule.endpoint] и вызывает её с view_args; для OPTIONS может ответить
+    автоматически.
+  notes: "Проверено чтением файлов. match_request вызывается из RequestContext.push (ctx.py:404)."
+
+- id: q03
+  type: semantic
+  question: "Где и когда создаётся (открывается) сессия пользователя и где она сохраняется?"
+  expected_files:
+    - src/flask/ctx.py
+    - src/flask/sessions.py
+    - src/flask/app.py
+  expected_symbols:
+    - RequestContext.push
+    - SecureCookieSessionInterface.open_session
+    - SecureCookieSessionInterface.save_session
+    - SessionInterface.make_null_session
+    - Flask.process_response
+  expected_ranges:
+    - src/flask/ctx.py:377-404
+    - src/flask/sessions.py:323-335
+    - src/flask/sessions.py:337-385
+    - src/flask/app.py:1298-1324
+  reference_answer: >-
+    Сессия открывается в RequestContext.push: если _session ещё нет, вызывается
+    app.session_interface.open_session, а при None подставляется make_null_session. По
+    умолчанию SecureCookieSessionInterface.open_session читает подписанную cookie через
+    itsdangerous и возвращает SecureCookieSession (пустую, если cookie нет или подпись
+    неверна). Сохраняется сессия в Flask.process_response вызовом save_session, который
+    ставит или удаляет cookie и добавляет Vary: Cookie.
+  notes: "Проверено чтением ctx.py:377-404, sessions.py:323-385, app.py:1298-1324."
+
+- id: q04
+  type: semantic
+  question: "Как выполняются функции before_request и after_request и в каком порядке?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/sansio/scaffold.py
+  expected_symbols:
+    - Flask.preprocess_request
+    - Flask.process_response
+    - Scaffold.before_request
+    - Scaffold.after_request
+  expected_ranges:
+    - src/flask/app.py:1271-1296
+    - src/flask/app.py:1298-1324
+    - src/flask/sansio/scaffold.py:460-484
+    - src/flask/sansio/scaffold.py:487-505
+  reference_answer: >-
+    Декораторы before_request/after_request только добавляют функцию в before_request_funcs /
+    after_request_funcs. preprocess_request сначала вызывает url_value_preprocessors, затем
+    before_request-функции приложения и blueprint'ов; если одна из них вернула не None, это
+    значение становится ответом и view не вызывается. process_response сначала вызывает
+    функции after_this_request, затем after_request blueprint'ов и приложения в обратном
+    порядке регистрации, после чего сохраняет сессию.
+  notes: "Проверено чтением. Оба метода вызываются из full_dispatch_request / finalize_request."
+
+# --- graph ----------------------------------------------------------------------------------
+- id: q05
+  type: graph
+  question: "Кто вызывает Flask.handle_user_exception и что затронет изменение её сигнатуры?"
+  expected_files:
+    - src/flask/app.py
+  expected_symbols:
+    - Flask.handle_user_exception
+    - Flask.full_dispatch_request
+    - Flask.wsgi_app
+  expected_ranges:
+    - src/flask/app.py:779-809
+    - src/flask/app.py:904-920
+    - src/flask/app.py:1479-1527
+  reference_answer: >-
+    В src/flask единственный вызов handle_user_exception находится в
+    Flask.full_dispatch_request (app.py:919), в блоке except вокруг preprocess_request и
+    dispatch_request. full_dispatch_request в свою очередь вызывается из Flask.wsgi_app
+    (app.py:1511), поэтому изменение сигнатуры сломает обработку ошибок любого запроса.
+  notes: >-
+    grep -rn "handle_user_exception" src/flask: определение app.py:779 и единственный вызов
+    app.py:919. Подклассы Flask в пользовательском коде, переопределяющие метод, тоже затронет.
+
+- id: q06
+  type: graph
+  question: "Что вызывает Flask.wsgi_app при обработке одного запроса?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/ctx.py
+    - src/flask/sansio/app.py
+  expected_symbols:
+    - Flask.wsgi_app
+    - Flask.request_context
+    - RequestContext.push
+    - Flask.full_dispatch_request
+    - Flask.handle_exception
+    - App.should_ignore_error
+    - RequestContext.pop
+  expected_ranges:
+    - src/flask/app.py:1479-1527
+    - src/flask/app.py:1407-1421
+    - src/flask/sansio/app.py:883-891
+    - src/flask/ctx.py:377-404
+    - src/flask/app.py:904-920
+    - src/flask/app.py:811-862
+    - src/flask/ctx.py:406-441
+  reference_answer: >-
+    wsgi_app создаёт RequestContext через request_context(environ), делает ctx.push() и
+    вызывает full_dispatch_request. При исключении вызывается handle_exception, затем ответ
+    вызывается как WSGI-приложение. В finally проверяется should_ignore_error и всегда
+    вызывается ctx.pop(error), который запускает teardown.
+  notes: "Проверено чтением app.py:1479-1527. should_ignore_error определён в sansio/app.py:883."
+
+- id: q07
+  type: graph
+  question: "От чего наследуется класс Flask и какие ещё классы имеют тот же базовый класс?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/sansio/app.py
+    - src/flask/sansio/scaffold.py
+    - src/flask/sansio/blueprints.py
+    - src/flask/blueprints.py
+  expected_symbols:
+    - Flask
+    - App
+    - Scaffold
+    - Blueprint
+  expected_ranges:
+    - src/flask/app.py:81-83
+    - src/flask/sansio/app.py:59-63
+    - src/flask/sansio/scaffold.py:52-68
+    - src/flask/sansio/blueprints.py:119-121
+    - src/flask/blueprints.py:18-18
+  reference_answer: >-
+    Flask (app.py) наследуется от App из sansio/app.py, а App наследуется от Scaffold из
+    sansio/scaffold.py. От Scaffold также наследуется sansio Blueprint, от которого
+    наследуется flask.blueprints.Blueprint, поэтому route, before_request, errorhandler и
+    другие общие методы есть и у приложения, и у blueprint'а.
+  notes: "grep -n '^class ' по файлам. В blueprints.py:10 Blueprint импортирован как SansioBlueprint."
+
+# --- history --------------------------------------------------------------------------------
+- id: q08
+  type: history
+  question: "Какой последний коммит менял src/flask/ctx.py и что в нём изменилось?"
+  expected_files:
+    - src/flask/ctx.py
+    - src/flask/sessions.py
+    - src/flask/app.py
+  expected_symbols:
+    - RequestContext.session
+    - SessionMixin.accessed
+  expected_ranges:
+    - src/flask/ctx.py:367-375
+    - src/flask/sessions.py:46-54
+    - src/flask/app.py:1321-1322
+  expected_commits:
+    - c17f3793
+  reference_answer: >-
+    Последний коммит c17f3793 "request context tracks session access" (David Lord,
+    2026-02-18). Атрибут RequestContext.session стал свойством поверх _session, которое
+    выставляет session.accessed = True при любом доступе, а SecureCookieSession больше не
+    отслеживает доступ сам. Это сделано, чтобы Vary: Cookie ставился и для операций вроде in
+    и len (GHSA-68rp-wp8r-4726).
+  notes: >-
+    git log -1 -- src/flask/ctx.py; git show c17f3793. Строки ctx.py:367-375 по git blame
+    целиком из этого коммита; process_response переведён на ctx._session (app.py:1321-1322).
+
+- id: q09
+  type: history
+  question: "Кто и в каком коммите добавил SessionInterface.get_cookie_partitioned?"
+  expected_files:
+    - src/flask/sessions.py
+  expected_symbols:
+    - SessionInterface.get_cookie_partitioned
+  expected_ranges:
+    - src/flask/sessions.py:215-221
+  expected_commits:
+    - 9efc1ebe
+  reference_answer: >-
+    Метод добавлен в коммите 9efc1ebe "add SESSION_COOKIE_PARTITIONED config" (David Lord,
+    2024-06-09, co-authored-by Jose Cespedes) и вошёл в Flask 3.1.0. Он возвращает значение
+    конфига SESSION_COOKIE_PARTITIONED и используется в save_session при установке и
+    удалении cookie.
+  notes: "git blame -L 215,221 src/flask/sessions.py; git log -S get_cookie_partitioned; git tag --contains 9efc1ebe -> 3.1.0."
+
+# --- overview -------------------------------------------------------------------------------
+- id: q10
+  type: overview
+  question: "Как устроен пакет flask и что он экспортирует наружу?"
+  expected_files:
+    - src/flask/__init__.py
+    - src/flask/app.py
+    - src/flask/blueprints.py
+    - src/flask/globals.py
+  expected_symbols:
+    - Flask
+    - Blueprint
+    - request
+    - session
+  expected_ranges:
+    - src/flask/__init__.py:5-43
+    - src/flask/app.py:81-81
+    - src/flask/blueprints.py:18-18
+    - src/flask/globals.py:46-51
+  reference_answer: >-
+    Публичный API пакета собран в src/flask/__init__.py реэкспортом из модулей app (Flask),
+    blueprints (Blueprint), config (Config), ctx (after_this_request, has_request_context),
+    globals (current_app, g, request, session), helpers (abort, redirect, url_for), json
+    (jsonify), signals (request_started, got_request_exception и др.), templating
+    (render_template) и wrappers (Request, Response). Класс Flask определён в app.py,
+    Blueprint в blueprints.py, а request и session в globals.py это LocalProxy поверх
+    контекста запроса.
+  notes: >-
+    Каждое имя из эталона сверено с __init__.py:5-43 (from .X import Y as Y). Эталон не
+    требует знать число файлов и модули, которых нет в __init__.py (cli, testing, sansio).
+
+- id: q11
+  type: overview
+  question: "За что отвечает подпакет flask.sansio?"
+  expected_files:
+    - src/flask/sansio/scaffold.py
+    - src/flask/sansio/app.py
+    - src/flask/sansio/blueprints.py
+  expected_symbols:
+    - Scaffold
+    - App
+    - Blueprint
+    - Scaffold.route
+    - App.add_url_rule
+  expected_ranges:
+    - src/flask/sansio/scaffold.py:52-68
+    - src/flask/sansio/scaffold.py:102-154
+    - src/flask/sansio/scaffold.py:336-365
+    - src/flask/sansio/app.py:59-63
+    - src/flask/sansio/app.py:605-661
+    - src/flask/sansio/blueprints.py:119-131
+  reference_answer: >-
+    В sansio лежат базовые классы с регистрацией и конфигурацией приложения: Scaffold
+    (общее поведение Flask и Blueprint) хранит view_functions, error_handler_spec,
+    before_request_funcs и after_request_funcs и даёт декораторы route, before_request,
+    errorhandler. App наследуется от Scaffold и служит центральным реестром view-функций,
+    URL-правил (url_map, add_url_rule) и конфигурации, а sansio Blueprint записывает те же
+    регистрации отложенно, до подключения к приложению. Методов обработки WSGI-запроса
+    (wsgi_app, full_dispatch_request, run) в sansio нет, классы служат базой для
+    flask.Flask и flask.Blueprint.
+  notes: >-
+    Только по docstring'ам и коду sansio/*.py. grep -nE "def (wsgi_app|run|full_dispatch_request)"
+    sansio/*.py пусто. sansio/README.md (sans-IO, Quart) намеренно не используется:
+    это не .py и в индекс не попадает.
+
+# --- trap -----------------------------------------------------------------------------------
+- id: q12
+  type: trap
+  question: "Как во Flask настроено встроенное ограничение частоты запросов (rate limiting)?"
+  expected_files: []
+  expected_symbols: []
+  expected_ranges: []
+  reference_answer: >-
+    В исходном коде Flask (src/flask) встроенного rate limiting нет: нет ни конфигурации, ни
+    middleware для ограничения частоты запросов. Агент должен сказать, что не нашёл это в
+    коде, и не придумывать ссылки (обычно это делают сторонние расширения).
+  notes: "grep -rniE 'rate.?limit|ratelimit|throttl' src/flask -> пусто."
+
+- id: q13
+  type: trap
+  question: "Как во Flask настроена встроенная аутентификация пользователей (логин и пароль)?"
+  expected_files: []
+  expected_symbols: []
+  expected_ranges: []
+  reference_answer: >-
+    Встроенной аутентификации пользователей в исходном коде Flask (src/flask) нет: нет ни
+    проверки логина и пароля, ни хранения учётных данных. Агент должен сказать, что не
+    нашёл этого в коде, и не выдавать примеры из docstring'ов за реализацию.
+  notes: >-
+    grep -rniE "login|logged|password|passwd|authenticat|authoriz|credentials" src/flask
+    находит только примеры в docstring'ах: CustomClient с authentication в Flask.test_client
+    (app.py:698-704) и загрузку пользователя из сессии в Scaffold.before_request
+    (sansio/scaffold.py:463-471). Ссылка на них как на "реализацию" считается выдумкой.

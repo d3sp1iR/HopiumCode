@@ -1,11 +1,17 @@
-.PHONY: index ask test eval lint
+PYTHON ?= .venv/bin/python
+# доп. флаги для ask и eval, например ARGS="--fake --mode vector"
+ARGS ?=
+
+.PHONY: fetch index ask test eval lint
+fetch:
+	bash scripts/fetch_repo.sh
 index:
-	python -m hopiumcode.cli index
+	$(PYTHON) -m hopiumcode.cli index
 ask:
-	python -m hopiumcode.cli ask "$(Q)"
+	$(PYTHON) -m hopiumcode.cli ask "$(Q)" $(ARGS)
 test:
-	python -m pytest -q
+	$(PYTHON) -m pytest -q
 eval:
-	python -m eval.run_eval
+	$(PYTHON) -m eval.run_eval $(ARGS)
 lint:
-	ruff check src tests eval
+	$(PYTHON) -m ruff check src tests eval
