@@ -1,0 +1,49 @@
+' Поток данных HopiumCode по docs/architecture.md. Исходник PlantUML (plantuml architecture.puml).
+@startuml architecture
+left to right direction
+skinparam componentStyle rectangle
+
+package "Индексация (офлайн), make index" {
+  database "data/repo/flask/src/flask" as repo
+  component "indexing.loader\nобход файлов" as loader
+  component "indexing.chunker\nфрагменты (Chunk)" as chunker
+  component "indexing.embed\nэмбеддинги, nomic-embed-text" as embed
+  database "indexing.vectorstore\nChroma" as vstore
+  database "retrieval.lexical\nBM25" as lexical
+  component "graph.extract\nузлы и рёбра" as gextract
+  database "graph.store\nKuzu | NetworkX" as gstore
+
+  repo --> loader
+  loader --> chunker
+  chunker --> embed
+  embed --> vstore
+  chunker --> lexical
+  loader --> gextract
+  gextract --> gstore
+}
+
+package "Запрос (онлайн), make ask" {
+  actor "разработчик" as user
+  component "orchestrator\nцикл агента" as orch
+  component "retrieval.hybrid\nвектор + BM25 + обход графа" as hybrid
+  component "prompts\nобогащённый запрос" as prompts
+  component "Ollama (LLM)\nqwen3" as llm
+  component "mcp_client" as mcpc
+  component "MCP-сервер\nread_file, search_code, find_callers,\ngit_log, git_blame" as mcps
+  component "verify_citations" as verify
+
+  user --> orch : вопрос
+  orch --> hybrid
+  hybrid --> prompts
+  prompts --> llm
+  llm --> mcps : tool_call
+  mcps --> mcpc
+  mcpc --> orch
+  orch --> verify
+  verify --> user : ответ со ссылками\n[путь:начало-конец]
+}
+
+vstore ..> hybrid
+lexical ..> hybrid
+gstore ..> hybrid
+@enduml

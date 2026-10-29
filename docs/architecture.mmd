@@ -1,0 +1,34 @@
+%% Поток данных HopiumCode по docs/architecture.md. Исходник Mermaid, рендерится на GitHub или mermaid.live.
+flowchart LR
+    subgraph IDX["Индексация (офлайн), make index"]
+        repo[("data/repo/flask/src/flask")]
+        loader["indexing.loader<br/>обход файлов"]
+        chunker["indexing.chunker<br/>фрагменты (Chunk)"]
+        embed["indexing.embed<br/>эмбеддинги, nomic-embed-text"]
+        vstore[("indexing.vectorstore<br/>Chroma")]
+        lexical[("retrieval.lexical<br/>BM25")]
+        gextract["graph.extract<br/>узлы и рёбра"]
+        gstore[("graph.store<br/>Kuzu | NetworkX")]
+        repo --> loader --> chunker --> embed --> vstore
+        chunker --> lexical
+        loader --> gextract --> gstore
+    end
+
+    subgraph QRY["Запрос (онлайн), make ask"]
+        question(["вопрос"])
+        orch["orchestrator<br/>цикл агента"]
+        hybrid["retrieval.hybrid<br/>вектор + BM25 + обход графа"]
+        prompts["prompts<br/>обогащённый запрос"]
+        llm["Ollama (LLM)<br/>qwen3"]
+        mcpc["mcp_client"]
+        mcps["MCP-сервер<br/>read_file, search_code, find_callers,<br/>git_log, git_blame"]
+        verify["verify_citations"]
+        answer(["ответ со ссылками<br/>[путь:начало-конец]"])
+        question --> orch --> hybrid --> prompts --> llm
+        llm -- "tool_call" --> mcps --> mcpc --> orch
+        orch --> verify --> answer
+    end
+
+    vstore -.-> hybrid
+    lexical -.-> hybrid
+    gstore -.-> hybrid
