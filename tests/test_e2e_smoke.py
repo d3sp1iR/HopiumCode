@@ -39,13 +39,14 @@ def test_fake_pipeline_answers_with_verified_citations(qid):
 
 def test_eval_main_fake_writes_result(tmp_path, capsys):
     assert main(["--fake", "--only", "q01,q12", "--out-dir", str(tmp_path)]) == 0
-    files = list(tmp_path.glob("*_hybrid_fake.json"))
-    assert len(files) == 1
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1 and files[0].with_suffix(".md").exists()
     data = json.loads(files[0].read_text(encoding="utf-8"))
-    assert [r["id"] for r in data["questions"]] == ["q01", "q12"]
-    assert set(data["summary"]["by_type"]) == {"semantic", "trap"}
-    assert all(r["citations_verified"] == 1.0 for r in data["questions"])
-    assert "ВСЕГО" in capsys.readouterr().out
+    rows = data["questions"]["hybrid"]
+    assert [r["id"] for r in rows] == ["q01", "q12"]
+    assert set(data["summary"]["hybrid"]["by_type"]) == {"semantic", "trap"}
+    assert all(r["citations_verified"] == 1.0 for r in rows)
+    assert "Итог по режимам" in capsys.readouterr().out
 
 
 def test_eval_main_rejects_unknown_id(tmp_path):
