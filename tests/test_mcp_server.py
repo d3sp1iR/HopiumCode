@@ -16,12 +16,28 @@ async def _list_tools_over_stdio(root):
                                    env={"REPO_ROOT": str(root), "PYTHONPATH": os.pathsep.join(sys.path)})
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
-        return [t.name for t in (await session.list_tools()).tools]
+        return (await session.list_tools()).tools
 
 
-def test_server_starts_over_stdio(tmp_path):
-    names = asyncio.run(asyncio.wait_for(_list_tools_over_stdio(tmp_path), 60))
-    assert isinstance(names, list)
+TOOLS = {"read_file", "search_code", "find_callers", "git_log", "git_blame"}
+
+
+def test_server_lists_five_tools_over_stdio(tmp_path):
+    tools = asyncio.run(asyncio.wait_for(_list_tools_over_stdio(tmp_path), 60))
+    assert {t.name for t in tools} == TOOLS
+    for t in tools:
+        assert t.description == server.DESCRIPTIONS[t.name]
+        schema = t.input_schema
+        assert schema["properties"] and all(p.get("description") for p in schema["properties"].values()), t.name
+
+
+def test_descriptions_short_and_cover_when_and_example():
+    import re
+    assert set(server.DESCRIPTIONS) == TOOLS
+    for name, text in server.DESCRIPTIONS.items():
+        assert len(re.findall(r"[.!?](?:\s|$)", text)) <= 3, name
+        assert f"{name}(" in text, f"{name}: нет примера вызова"
+        assert "Результат" in text, f"{name}: нет формата результата"
 
 
 def test_root_from_env(tmp_path, monkeypatch):
