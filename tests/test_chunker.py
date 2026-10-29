@@ -102,15 +102,25 @@ def test_class_text_excludes_methods_and_nested_classes():
     assert "def prop" not in outer.text and "class Inner" not in outer.text
 
 
-def test_module_chunk_without_definitions():
+def test_module_chunks_without_definitions():
     chunks = chunk_source(SAMPLE, "sample.py")
     mods = [c for c in chunks if c.kind == "module"]
-    assert len(mods) == 1
-    m = mods[0]
-    assert m.id == "sample.py::#1" and m.name is None
-    assert "import functools" in m.text and 'if __name__ == "__main__":' in m.text
-    assert "def " not in m.text and "class " not in m.text
-    assert m.start_line == 1
+    assert [(m.id, m.start_line, m.end_line) for m in mods] == [("sample.py::#1", 1, 4), ("sample.py::#2", 40, 41)]
+    assert all(m.name is None for m in mods)
+    assert "import functools" in mods[0].text and 'if __name__ == "__main__":' in mods[1].text
+    assert all("def " not in m.text and "class " not in m.text for m in mods)
+
+
+def test_every_chunk_is_contiguous_slice_of_file():
+    # диапазон строк любого фрагмента не накрывает чужой код: текст равен строкам файла
+    for c in chunk_source(SAMPLE, "sample.py"):
+        assert lines_of(c, SAMPLE) == c.text, c.id
+
+
+def test_module_code_between_definitions_is_separate():
+    src = "import os\n\n\ndef f():\n    return 1\n\n\nX = f()\n\n\ndef g():\n    return 2\n\n\nY = g()\n"
+    mods = [(c.start_line, c.end_line) for c in chunk_source(src, "m.py") if c.kind == "module"]
+    assert mods == [(1, 1), (8, 8), (15, 15)]
 
 
 def test_ids_unique_and_formatted():
@@ -146,8 +156,10 @@ def test_long_function_split_with_overlap():
     src = f"def long():\n{body}\n    return 1\n"
     chunks = [c for c in chunk_source(src, "long.py") if c.name == "long"]
     assert len(chunks) > 1
-    for c in chunks:
+    assert chunks[0].id == "long.py::long"                    # первая часть сохраняет имя
+    for c in chunks[1:]:
         assert c.id.startswith("long.py::#")
+    for c in chunks:
         assert lines_of(c, src) == c.text                     # текст части совпадает с её строками в файле
         assert estimate_tokens(c.text) <= MAX_TOKENS * 1.2
     src_lines = src.splitlines()
@@ -202,6 +214,7 @@ def test_flask_files_and_chunks():
             "Scaffold.route", "url_for"} <= names
     paths = {c.path for c in chunks}
     assert "app.py" in paths and "sansio/scaffold.py" in paths and "json/tag.py" in paths
+    sources = {p: (FLASK_SRC / p).read_text(encoding="utf-8") for p in paths}
     for c in chunks:
-        n_lines = len((FLASK_SRC / c.path).read_text(encoding="utf-8").splitlines())
-        assert 1 <= c.start_line <= c.end_line <= n_lines
+        assert lines_of(c, sources[c.path]) == c.text, c.id    # непрерывный кусок файла
+    assert max(c.end_line - c.start_line for c in chunks if c.kind == "module") < 100

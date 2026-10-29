@@ -20,7 +20,7 @@ from .chunker import chunk_file
 from .loader import iter_files
 
 HASHES_FILE = "file_hashes.json"
-CHUNKER_VERSION = 1  # увеличить при изменении логики chunker: индекс пересоберётся
+CHUNKER_VERSION = 2  # увеличить при изменении логики chunker: индекс пересоберётся
 
 
 @dataclass

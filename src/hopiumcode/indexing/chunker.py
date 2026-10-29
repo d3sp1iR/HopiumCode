@@ -1,12 +1,13 @@
 """Разбиение файлов на фрагменты. Владелец: участник 2.
 
 Python через ast: каждая функция, метод и класс отдельным фрагментом (с декораторами и docstring),
-верхнеуровневый код модуля одним фрагментом kind="module". В тексте класса нет тел методов и вложенных
+верхнеуровневый код модуля фрагментом kind="module" (по одному на каждый непрерывный участок между
+определениями, чтобы диапазон строк не накрывал чужой код). В тексте класса нет тел методов и вложенных
 классов: они идут своими фрагментами, в модуле нет определений. Функции внутри функций остаются в тексте
 родителя. Определения внутри if/try/with на уровне модуля или класса считаются определениями этого уровня.
 
 Фрагмент длиннее MAX_TOKENS (слов * 1.5) режется по пустым строкам с перекрытием OVERLAP строк; номера
-строк сохраняются. id: "путь::qualified_name", а для частей длинных фрагментов, кода модуля и повторных
+строк сохраняются. id: "путь::qualified_name" у первой части, а у следующих частей, кода модуля и повторных
 имён (например, @overload или getter/setter) "путь::#N"; id уникальны в пределах файла.
 """
 from __future__ import annotations
@@ -117,8 +118,18 @@ def _segments(lines: list[int], src: list[str]) -> list[list[int]]:
     return segments
 
 
-def split_lines(lines: list[int], src: list[str]) -> list[list[int]]:
-    """Режет фрагмент на части не длиннее ~MAX_TOKENS; каждая следующая начинается с OVERLAP строк предыдущей."""
+def _runs(lines: list[int]) -> list[list[int]]:
+    """Непрерывные участки: разрыв нумерации означает вырезанное определение."""
+    runs: list[list[int]] = []
+    for n in lines:
+        if runs and n == runs[-1][-1] + 1:
+            runs[-1].append(n)
+        else:
+            runs.append([n])
+    return runs
+
+
+def _split_run(lines: list[int], src: list[str]) -> list[list[int]]:
     lines = _strip_blank(lines, src)
     if not lines or estimate_tokens(_text(lines, src)) <= MAX_TOKENS:
         return [lines] if lines else []
@@ -137,6 +148,15 @@ def split_lines(lines: list[int], src: list[str]) -> list[list[int]]:
     return pieces
 
 
+def split_lines(lines: list[int], src: list[str]) -> list[list[int]]:
+    """Режет фрагмент на непрерывные части не длиннее ~MAX_TOKENS.
+
+    Части не перешагивают вырезанные определения (иначе диапазон строк фрагмента накрыл бы чужой код),
+    а внутри непрерывного участка каждая следующая часть начинается с OVERLAP строк предыдущей.
+    """
+    return [piece for run in _runs(lines) for piece in _split_run(run, src)]
+
+
 def chunk_source(source: str, rel_path: str) -> list[Chunk]:
     """Фрагменты Python-кода; rel_path пишется в Chunk.path и id. SyntaxError пробрасывается."""
     tree = ast.parse(source, filename=rel_path)
@@ -149,13 +169,13 @@ def chunk_source(source: str, rel_path: str) -> list[Chunk]:
     counter = 0
     for u in units:
         pieces = split_lines(u.lines, src)
-        for piece in pieces:
-            cid = f"{rel_path}::{u.name}" if u.name and len(pieces) == 1 else None
+        for i, piece in enumerate(pieces):
+            cid = f"{rel_path}::{u.name}" if u.name and i == 0 else None  # остальные части: #N
             if cid is None or cid in seen:
                 counter += 1
                 cid = f"{rel_path}::#{counter}"
             seen.add(cid)
-            text = _text([n for n in u.lines if piece[0] <= n <= piece[-1]], src)  # с пустыми строками
+            text = _text(list(range(piece[0], piece[-1] + 1)), src)  # часть непрерывна: текст = строки файла
             chunks.append(Chunk(cid, rel_path, piece[0], piece[-1], u.kind, u.name, text, "python"))
     chunks.sort(key=lambda c: (c.start_line, -c.end_line))
     return chunks
