@@ -52,15 +52,19 @@ def test_eval_main_rejects_unknown_id(tmp_path):
     assert main(["--fake", "--only", "q99", "--out-dir", str(tmp_path)]) == 1
 
 
-def test_default_agent_falls_back_to_stubs(capsys):
+def test_default_agent_falls_back_to_stubs(capsys, tmp_path, monkeypatch):
     pytest.importorskip("ollama")
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))      # MCP-сервер (зона 4) работает по временному корню
     agent = orchestrator.build_default_agent(CFG)
     agent.model = ScriptedChat()  # без Ollama: проверяем подключение ретривера и инструментов
-    ans = agent.answer("Где создаётся сессия?")
+    try:
+        ans = agent.answer("Где создаётся сессия?")
+    finally:
+        agent.tools.close()
     assert ans.citations
     warnings = orchestrator.fallback_warnings()
     assert any("retrieval.hybrid.retrieve" in w and "участник 3" in w for w in warnings)
-    assert any("mcp_client.McpClient" in w and "участник 4" in w for w in warnings)
+    assert not any("mcp_client.McpClient" in w for w in warnings)   # McpClient реализован: отката нет
     assert "⚠" in capsys.readouterr().err
 
 

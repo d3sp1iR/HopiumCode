@@ -81,9 +81,11 @@ def test_step_limit_forces_final_answer_without_tools():
 
 
 def test_tools_not_implemented_runs_without_tools():
-    from hopiumcode.mcp_client import McpClient   # настоящая заглушка участника 4: NotImplementedError
+    class NotReady(StubTools):                    # клиент инструментов, который ещё не реализован
+        def list_tools_for_ollama(self):
+            raise NotImplementedError("участник 4")
     m = Seq(ModelReply(f"Ответ {REF}."))
-    a = agent(m, McpClient()).answer("q")
+    a = agent(m, NotReady()).answer("q")
     assert a.citations == [REF] and m.calls[0][1] is None
 
 
