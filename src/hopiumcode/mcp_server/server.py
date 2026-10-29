@@ -36,38 +36,39 @@ READ_SUFFIXES = {".py"}  # решение команды: в индексе и �
 # Тексты для модели: описания инструментов и аргументов (правятся здесь, см. docs/mcp_tools.md)
 DESCRIPTIONS = {
     "search_code": (
-        "Ищет фрагменты кода по смыслу: где и как что-то реализовано, за что отвечает модуль, например "
-        'search_code(query="обработка исключений в запросе handle_exception"). '
-        "Не используй для вопросов «кто вызывает» (find_callers) и «кто менял, история» (git_log, git_blame). "
+        "Вызывай первым для вопросов «где и как это работает», «за что отвечает модуль», «из чего состоит»: "
+        "не отвечай по памяти и не пиши вызов текстом, а вызови, например "
+        'search_code(query="маршрутизация URL route add_url_rule"). '
+        "Не подходит для «кто вызывает» (find_callers) и «кто менял, в каком коммите» (git_log, git_blame). "
         'Результат: строки "[путь:начало-конец] | вид | имя | начало кода".'
     ),
     "read_file": (
-        "Показывает строки файла с номерами, когда путь уже известен из вопроса или другого инструмента, например "
-        'read_file(path="app.py", start_line=900, end_line=960). '
-        "Не используй, чтобы искать, где что находится: для этого search_code. "
+        "Вызывай, когда путь к файлу уже известен из вопроса или другого инструмента и нужно увидеть код, "
+        'например read_file(path="app.py", start_line=900, end_line=960). '
+        "Не ищи им, где что находится: для этого search_code. "
         'Результат: первая строка "[путь:начало-конец]", затем строки "  12| код".'
     ),
     "find_callers": (
-        "Находит функции, которые вызывают указанную функцию или метод: вопросы «кто вызывает X», "
-        '«что сломается, если изменить X», например find_callers(symbol="make_response"). '
-        "Не используй для поиска по смыслу (search_code) и для истории (git_log). "
+        "Вызывай для вопросов «кто вызывает X», «где используется X», «что сломается, если изменить X»: передай "
+        'имя функции из вопроса, например find_callers(symbol="make_response"). '
+        "Не подходит для поиска по смыслу (search_code) и для истории (git_log). "
         'Результат: строки "[путь:начало-конец] | имя вызывающей функции".'
     ),
     "git_log": (
-        "Показывает последние коммиты, менявшие файл: вопросы «кто и когда менял файл», «история изменений», "
-        'например git_log(path="sessions.py", n=5). '
-        "Не используй для вопросов о том, как работает код; для конкретной строки или функции — git_blame. "
+        "Вызывай для вопросов «кто и когда менял файл», «последний коммит», «история изменений», например "
+        'git_log(path="ctx.py", n=5). '
+        "Для одной строки или функции («кто добавил метод») — git_blame. "
         'Результат: строки "хэш | автор | дата | сообщение коммита".'
     ),
     "git_blame": (
-        "Показывает, в каком коммите, кем и когда последний раз изменена строка файла: вопросы «кто добавил "
-        'эту функцию», «в каком коммите появилось», например git_blame(path="ctx.py", line=368). '
-        "Номер строки сначала найди через search_code или read_file; для истории всего файла — git_log. "
+        "Вызывай для вопросов «кто и в каком коммите добавил или изменил функцию, строку», например "
+        'git_blame(path="sessions.py", line=215); если номер строки неизвестен, сначала найди его через search_code. '
+        "Для истории всего файла — git_log. "
         'Результат: "[путь:строка-строка] коммит хэш | автор | дата | сообщение" и сама строка.'
     ),
 }
 ARGS = {
-    "path": "Путь к файлу относительно корня репозитория, например app.py или sansio/scaffold.py.",
+    "path": "Путь к файлу от корня кода (src/flask), например ctx.py или sansio/scaffold.py.",
     "start_line": "Первая строка (с 1). По умолчанию 1.",
     "end_line": f"Последняя строка включительно. По умолчанию start_line + {DEFAULT_LINES - 1}; "
                 f"за один вызов не больше {MAX_LINES} строк.",
@@ -107,6 +108,24 @@ def resolve_path(root: Path, path: str) -> Path:
     return full
 
 
+def locate(root: Path, path: str) -> Path:
+    """resolve_path, а если файла нет — пробует отрезать префикс, совпадающий с хвостом корня.
+
+    Модель часто передаёт путь от корня git (src/flask/ctx.py), хотя корень инструментов — src/flask.
+    """
+    full = resolve_path(root, path)
+    if full.exists():
+        return full
+    raw = path.strip().replace("\\", "/")
+    for i in range(1, len(root.parts)):
+        prefix = "/".join(root.parts[-i:]) + "/"
+        if raw.startswith(prefix):
+            candidate = resolve_path(root, raw[len(prefix):])
+            if candidate.exists():
+                return candidate
+    return full
+
+
 def _rel(root: Path, full: Path) -> str:
     return full.relative_to(root).as_posix()
 
@@ -119,7 +138,7 @@ def read_file(root: Path, path: str, start_line: int | None = None, end_line: in
     """Строки файла в формате "  12| текст"; первая строка ответа — ссылка [путь:начало-конец]."""
     root = Path(root).resolve()
     try:
-        full = resolve_path(root, path)
+        full = locate(root, path)
     except ToolInputError as ex:
         return _error(str(ex))
     if not full.exists():
@@ -190,7 +209,7 @@ def _git_failure(ex_or_res, root: Path) -> str:
 
 
 def _git_target(root: Path, path: str) -> tuple[Path, str]:
-    full = resolve_path(root, path)
+    full = locate(root, path)
     if not full.is_file():
         raise ToolInputError(f"файл не найден: {path}")
     return full, _rel(root, full)

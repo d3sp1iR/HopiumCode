@@ -321,3 +321,10 @@ def test_find_callers_uses_graph_when_ready(calls_repo, monkeypatch):
     out = server.find_callers(calls_repo, "validate")
     assert "граф кода" in out.splitlines()[0] and "⚠" not in out
     assert out.splitlines()[1:] == ["[pkg/app.py:5-8] | Service.register", "unknown::thing | (строки не найдены)"]
+
+
+def test_git_root_relative_path_is_accepted(git_repo):
+    # корень инструментов proj/src, а модель передала путь от корня git
+    assert server.read_file(git_repo, "src/app.py").startswith("[app.py:1-")
+    assert server.git_log(git_repo, "src/app.py").startswith("git log app.py")
+    assert server.read_file(git_repo, "src/../../x.py").startswith("Ошибка: путь вне репозитория")
