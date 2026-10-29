@@ -342,3 +342,444 @@
     находит только примеры в docstring'ах: CustomClient с authentication в Flask.test_client
     (app.py:698-704) и загрузку пользователя из сессии в Scaffold.before_request
     (sansio/scaffold.py:463-471). Ссылка на них как на "реализацию" считается выдумкой.
+
+# ============================================================================================
+# Расширение до 32 вопросов (шаг 1 feature/eval-docs). Flask 3.1.3, коммит 22d92470.
+
+# --- semantic -------------------------------------------------------------------------------
+- id: q14
+  type: semantic
+  question: "Как Flask строит URL по имени endpoint и что происходит, если URL построить не удалось?"
+  expected_files:
+    - src/flask/helpers.py
+    - src/flask/app.py
+    - src/flask/sansio/app.py
+  expected_symbols:
+    - url_for
+    - Flask.url_for
+    - App.handle_url_build_error
+    - App.inject_url_defaults
+  expected_ranges:
+    - src/flask/helpers.py:195-246
+    - src/flask/app.py:1003-1127
+    - src/flask/sansio/app.py:932-964
+  reference_answer: >-
+    Функция url_for из helpers просто вызывает current_app.url_for. Метод приложения берёт
+    url_adapter из контекста запроса (относительные endpoint вида ".name" дополняет именем
+    blueprint) или из контекста приложения, подставляет значения по умолчанию через
+    inject_url_defaults и вызывает url_adapter.build. При BuildError вызывается
+    handle_url_build_error: он по очереди пробует url_build_error_handlers и, если ни один не
+    вернул значение, заново выбрасывает ошибку.
+  notes: "Проверено чтением helpers.py:195-246, app.py:1003-1127, sansio/app.py:932-964."
+
+- id: q15
+  type: semantic
+  question: "Как значение, которое вернула view-функция (строка, словарь, кортеж), превращается в объект ответа?"
+  expected_files:
+    - src/flask/app.py
+  expected_symbols:
+    - Flask.make_response
+    - Flask.finalize_request
+  expected_ranges:
+    - src/flask/app.py:1129-1269
+    - src/flask/app.py:922-951
+  reference_answer: >-
+    Это делает метод приложения make_response, его вызывает finalize_request. Кортеж
+    распаковывается в (тело, статус, заголовки) или в пару (тело, статус|заголовки); None
+    вызывает TypeError. Строки, bytes и итераторы оборачиваются в response_class, dict и list
+    превращаются в JSON-ответ через self.json.response, а другие Response и WSGI-вызываемые
+    объекты приводятся через force_type. Затем применяются статус и заголовки из кортежа.
+  notes: "Проверено чтением app.py:1129-1269; вызов из finalize_request: app.py:939."
+
+- id: q16
+  type: semantic
+  question: "Как работают одноразовые сообщения пользователю (flash): где они хранятся между запросами и как извлекаются?"
+  expected_files:
+    - src/flask/helpers.py
+  expected_symbols:
+    - flash
+    - get_flashed_messages
+  expected_ranges:
+    - src/flask/helpers.py:318-349
+    - src/flask/helpers.py:352-391
+  reference_answer: >-
+    flash добавляет пару (категория, сообщение) в список session["_flashes"], заново
+    присваивает его в сессию и шлёт сигнал message_flashed. get_flashed_messages при первом
+    вызове в запросе забирает список из сессии через pop и кэширует его в
+    request_ctx.flashes, поэтому повторные вызовы в том же запросе возвращают те же сообщения;
+    можно отфильтровать по категориям и вернуть категории вместе с текстом.
+  notes: "Проверено чтением helpers.py:318-391. Слово flash в вопросе — термин, а не имя файла."
+
+- id: q17
+  type: semantic
+  question: "Какими способами можно загрузить конфигурацию приложения (Python-файл, объект, переменные окружения)?"
+  expected_files:
+    - src/flask/config.py
+  expected_symbols:
+    - Config.from_envvar
+    - Config.from_prefixed_env
+    - Config.from_pyfile
+    - Config.from_object
+    - Config.from_file
+  expected_ranges:
+    - src/flask/config.py:102-124
+    - src/flask/config.py:126-185
+    - src/flask/config.py:187-216
+    - src/flask/config.py:218-254
+  reference_answer: >-
+    Класс Config (наследник dict) даёт несколько загрузчиков. from_pyfile исполняет
+    Python-файл как модуль и передаёт его в from_object, а from_object копирует только
+    атрибуты в верхнем регистре; from_envvar берёт путь к файлу из переменной окружения и
+    вызывает from_pyfile. from_prefixed_env читает переменные с префиксом FLASK_, разбирает
+    значения через json.loads и поддерживает вложенные ключи через "__"; есть также from_file
+    с произвольным загрузчиком и from_mapping.
+  notes: "Проверено чтением config.py:102-254."
+
+- id: q18
+  type: semantic
+  question: "Как Flask сериализует в JSON типы, которых нет в стандартном json: даты, UUID, Decimal, dataclass?"
+  expected_files:
+    - src/flask/json/provider.py
+  expected_symbols:
+    - _default
+    - DefaultJSONProvider
+    - DefaultJSONProvider.dumps
+  expected_ranges:
+    - src/flask/json/provider.py:108-121
+    - src/flask/json/provider.py:124-138
+    - src/flask/json/provider.py:166-179
+  reference_answer: >-
+    DefaultJSONProvider.dumps передаёт в json.dumps параметр default=self.default, а default
+    по умолчанию это функция _default. Она превращает date/datetime в HTTP-дату (http_date),
+    Decimal и UUID в строку, dataclass в словарь через dataclasses.asdict, объекты с
+    __html__ в строку, а для остальных типов выбрасывает TypeError.
+  notes: "Проверено чтением json/provider.py:108-179; default = staticmethod(_default) на строке 138."
+
+- id: q19
+  type: semantic
+  question: "Как ограничивается размер тела запроса и данных формы и можно ли задать лимит для отдельного запроса?"
+  expected_files:
+    - src/flask/wrappers.py
+    - src/flask/app.py
+  expected_symbols:
+    - Request.max_content_length
+    - Request.max_form_memory_size
+    - Request.max_form_parts
+  expected_ranges:
+    - src/flask/wrappers.py:59-90
+    - src/flask/wrappers.py:92-117
+    - src/flask/wrappers.py:119-144
+    - src/flask/app.py:198-200
+  reference_answer: >-
+    У Request есть свойства max_content_length, max_form_memory_size и max_form_parts: если
+    значение задано на конкретном запросе через setter, используется оно, иначе берётся
+    конфиг MAX_CONTENT_LENGTH, MAX_FORM_MEMORY_SIZE, MAX_FORM_PARTS текущего приложения. По
+    умолчанию MAX_CONTENT_LENGTH равен None, MAX_FORM_MEMORY_SIZE 500 000, MAX_FORM_PARTS
+    1 000; превышение размера тела даёт 413 RequestEntityTooLarge.
+  notes: "Проверено чтением wrappers.py:59-144 и app.py:198-200 (значения по умолчанию)."
+
+# --- graph ----------------------------------------------------------------------------------
+- id: q20
+  type: graph
+  question: "Кто вызывает App._find_error_handler?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/sansio/app.py
+  expected_symbols:
+    - App._find_error_handler
+    - Flask.handle_http_exception
+    - Flask.handle_user_exception
+    - Flask.handle_exception
+  expected_ranges:
+    - src/flask/sansio/app.py:823-846
+    - src/flask/app.py:744-777
+    - src/flask/app.py:779-809
+    - src/flask/app.py:811-862
+  reference_answer: >-
+    В src/flask его вызывают три метода Flask: handle_http_exception (app.py:774),
+    handle_user_exception (app.py:804) и handle_exception (app.py:857), последний для
+    InternalServerError. Сам метод определён в sansio/app.py и ищет обработчик сначала по
+    коду, затем по классу исключения через MRO, по blueprint'ам и приложению.
+  notes: "grep -rn '_find_error_handler' src/flask: определение sansio/app.py:823, вызовы app.py:774, 804, 857."
+
+- id: q21
+  type: graph
+  question: "Что вызывает Flask.finalize_request?"
+  expected_files:
+    - src/flask/app.py
+  expected_symbols:
+    - Flask.finalize_request
+    - Flask.make_response
+    - Flask.process_response
+  expected_ranges:
+    - src/flask/app.py:922-951
+    - src/flask/app.py:1129-1269
+    - src/flask/app.py:1298-1324
+  reference_answer: >-
+    finalize_request вызывает make_response, чтобы превратить результат view в Response, затем
+    process_response (after_request-функции и сохранение сессии) и отправляет сигнал
+    request_finished. Если это финализация после обработчика ошибки (from_error_handler=True),
+    исключение при этом логируется через logger.exception, иначе пробрасывается.
+  notes: "Проверено чтением app.py:922-951."
+
+- id: q22
+  type: graph
+  question: "Что сломается, если изменить сигнатуру SessionInterface.open_session?"
+  expected_files:
+    - src/flask/sessions.py
+    - src/flask/ctx.py
+    - src/flask/testing.py
+  expected_symbols:
+    - SessionInterface.open_session
+    - SecureCookieSessionInterface.open_session
+    - RequestContext.push
+    - FlaskClient.session_transaction
+  expected_ranges:
+    - src/flask/sessions.py:249-261
+    - src/flask/sessions.py:323-335
+    - src/flask/ctx.py:377-404
+    - src/flask/testing.py:136-183
+  reference_answer: >-
+    Метод вызывают в двух местах: RequestContext.push при открытии сессии в начале запроса
+    (ctx.py:396) и FlaskClient.session_transaction в тестовом клиенте (testing.py:165).
+    Кроме того, его переопределяет SecureCookieSessionInterface, а также пользовательские
+    интерфейсы сессий, поэтому изменение сигнатуры сломает открытие сессии в каждом запросе и
+    в тестах.
+  notes: "grep -rn 'open_session' src/flask: вызовы ctx.py:396 и testing.py:165; определения sessions.py:249 и 323."
+
+- id: q23
+  type: graph
+  question: "Кто вызывает Flask.ensure_sync и что затронет его изменение?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/views.py
+    - src/flask/ctx.py
+  expected_symbols:
+    - Flask.ensure_sync
+    - Flask.async_to_sync
+    - Flask.dispatch_request
+    - Flask.preprocess_request
+    - Flask.process_response
+    - MethodView.dispatch_request
+    - copy_current_request_context
+  expected_ranges:
+    - src/flask/app.py:966-978
+    - src/flask/app.py:879-902
+    - src/flask/app.py:1271-1296
+    - src/flask/app.py:1298-1324
+    - src/flask/views.py:182-191
+    - src/flask/ctx.py:155-193
+  reference_answer: >-
+    ensure_sync оборачивает async-функции через async_to_sync и вызывается почти везде, где
+    Flask запускает пользовательский код: view в dispatch_request, before_request и
+    after_request в preprocess_request/process_response, обработчики ошибок, teardown-функции,
+    View.as_view и MethodView.dispatch_request, copy_current_request_context. Также он
+    передаётся как _async_wrapper при отправке сигналов. Изменение затронет вызов всех view,
+    хуков и сигналов.
+  notes: "grep -rn 'ensure_sync' src/flask: вызовы в app.py, views.py:110/116/191, ctx.py:191/254/272, helpers.py:346, templating.py."
+
+- id: q24
+  type: graph
+  question: "От чего наследуется MethodView и как она выбирает метод-обработчик для запроса?"
+  expected_files:
+    - src/flask/views.py
+  expected_symbols:
+    - View
+    - MethodView
+    - MethodView.dispatch_request
+  expected_ranges:
+    - src/flask/views.py:16-16
+    - src/flask/views.py:138-138
+    - src/flask/views.py:165-180
+    - src/flask/views.py:182-191
+  reference_answer: >-
+    MethodView наследуется от View из того же модуля. В __init_subclass__ она собирает
+    methods из базовых классов и из определённых методов с именами HTTP-методов, а
+    dispatch_request берёт метод по request.method.lower() (для HEAD при отсутствии
+    обработчика использует get) и вызывает его через current_app.ensure_sync.
+  notes: "Проверено чтением views.py:16, 138-191."
+
+- id: q25
+  type: graph
+  question: "Какие классы наследуются от SessionInterface и SecureCookieSession и от чего наследуются они сами?"
+  expected_files:
+    - src/flask/sessions.py
+  expected_symbols:
+    - SessionMixin
+    - SecureCookieSession
+    - NullSession
+    - SessionInterface
+    - SecureCookieSessionInterface
+  expected_ranges:
+    - src/flask/sessions.py:24-24
+    - src/flask/sessions.py:57-57
+    - src/flask/sessions.py:83-83
+    - src/flask/sessions.py:100-100
+    - src/flask/sessions.py:284-284
+  reference_answer: >-
+    От SessionInterface наследуется SecureCookieSessionInterface, от SecureCookieSession
+    наследуется NullSession. SecureCookieSession наследуется от CallbackDict (werkzeug) и
+    SessionMixin, SessionMixin от MutableMapping, а SessionInterface базового класса внутри
+    Flask не имеет.
+  notes: "grep -n '^class ' src/flask/sessions.py."
+
+- id: q26
+  type: graph
+  question: "Кто вызывает Flask.make_response?"
+  expected_files:
+    - src/flask/app.py
+    - src/flask/helpers.py
+  expected_symbols:
+    - Flask.make_response
+    - Flask.finalize_request
+    - make_response
+  expected_ranges:
+    - src/flask/app.py:1129-1269
+    - src/flask/app.py:922-951
+    - src/flask/helpers.py:146-192
+  reference_answer: >-
+    В src/flask два вызова: Flask.finalize_request (app.py:939) при обработке каждого
+    запроса и публичная функция make_response из helpers (helpers.py:192), которую
+    вызывают из view, чтобы получить объект ответа заранее.
+  notes: "grep -rn '\\.make_response(' src/flask: app.py:939 и helpers.py:192."
+
+# --- overview -------------------------------------------------------------------------------
+- id: q27
+  type: overview
+  question: "Какие контексты есть во Flask и за что отвечает каждый из них?"
+  expected_files:
+    - src/flask/ctx.py
+    - src/flask/globals.py
+  expected_symbols:
+    - AppContext
+    - RequestContext
+    - _AppCtxGlobals
+    - current_app
+    - request
+  expected_ranges:
+    - src/flask/ctx.py:29-31
+    - src/flask/ctx.py:238-249
+    - src/flask/ctx.py:287-335
+    - src/flask/globals.py:28-51
+  reference_answer: >-
+    Есть контекст приложения AppContext и контекст запроса RequestContext. AppContext хранит
+    приложение, URL-адаптер и объект g (_AppCtxGlobals, пространство имён для данных на время контекста) и
+    пушится в начале запроса или при выполнении CLI-команд. RequestContext хранит запрос,
+    URL-адаптер, сессию и flash-сообщения, а при pop запускает teardown-функции. Глобальные
+    current_app, g, request и session — это LocalProxy поверх этих контекстов.
+  notes: "Проверено по docstring'ам классов в ctx.py и определениям LocalProxy в globals.py:28-51."
+
+- id: q28
+  type: overview
+  question: "Какие встроенные команды командной строки есть у Flask и как подключаются команды расширений?"
+  expected_files:
+    - src/flask/cli.py
+  expected_symbols:
+    - FlaskGroup
+    - FlaskGroup._load_plugin_commands
+    - run_command
+    - shell_command
+    - routes_command
+  expected_ranges:
+    - src/flask/cli.py:531-531
+    - src/flask/cli.py:593-596
+    - src/flask/cli.py:600-613
+    - src/flask/cli.py:1007-1009
+    - src/flask/cli.py:1069-1070
+  reference_answer: >-
+    FlaskGroup при add_default_commands добавляет три встроенные команды: run (run_command),
+    shell (shell_command) и routes (routes_command). Команды расширений подгружает
+    _load_plugin_commands из entry points группы "flask.commands".
+  notes: "Проверено чтением cli.py:531-613 и 1007-1070."
+
+- id: q29
+  type: overview
+  question: "Из каких частей состоит поддержка JSON во Flask и как она используется для сессий?"
+  expected_files:
+    - src/flask/json/__init__.py
+    - src/flask/json/provider.py
+    - src/flask/json/tag.py
+    - src/flask/sessions.py
+  expected_symbols:
+    - dumps
+    - jsonify
+    - JSONProvider
+    - DefaultJSONProvider
+    - TaggedJSONSerializer
+  expected_ranges:
+    - src/flask/json/__init__.py:13-44
+    - src/flask/json/__init__.py:138-170
+    - src/flask/json/provider.py:19-36
+    - src/flask/json/provider.py:124-138
+    - src/flask/json/tag.py:219-219
+    - src/flask/sessions.py:273-273
+  reference_answer: >-
+    Функции dumps, loads, jsonify и др. из flask.json делегируют в current_app.json, то есть
+    в провайдер приложения (dumps и loads без активного приложения откатываются на
+    стандартный json). Провайдеры описаны в json/provider.py: базовый JSONProvider и
+    DefaultJSONProvider на стандартном json. Отдельно json/tag.py содержит
+    TaggedJSONSerializer с тегами для tuple, bytes, Markup, UUID и datetime; его экземпляр
+    session_json_serializer используется для подписанных cookie-сессий.
+  notes: "Проверено чтением json/__init__.py, json/provider.py, json/tag.py:60-219 и sessions.py:273."
+
+# --- history --------------------------------------------------------------------------------
+- id: q30
+  type: history
+  question: "Кто и в каком коммите добавил ротацию секретного ключа (запасные ключи) для подписи сессий?"
+  expected_files:
+    - src/flask/sessions.py
+    - src/flask/app.py
+  expected_symbols:
+    - SecureCookieSessionInterface.get_signing_serializer
+  expected_ranges:
+    - src/flask/sessions.py:303-321
+    - src/flask/app.py:184-184
+  expected_commits:
+    - e13373f8
+  reference_answer: >-
+    Коммит e13373f8 "enable secret key rotation" (David Lord, 2024-11-08), вошёл в Flask
+    3.1.0. Он добавил конфиг SECRET_KEY_FALLBACKS и изменил get_signing_serializer: запасные
+    ключи кладутся в список перед текущим secret_key, и этот список передаётся в
+    URLSafeTimedSerializer.
+  notes: "git blame -L 303,321 src/flask/sessions.py (строки 306-320 из e13373f8), git blame -L 184,184 src/flask/app.py; git tag --contains -> 3.1.0."
+
+- id: q31
+  type: history
+  question: "Когда и в каком коммите появилась проверка доверенных хостов при обработке запроса?"
+  expected_files:
+    - src/flask/app.py
+  expected_symbols:
+    - Flask.create_url_adapter
+  expected_ranges:
+    - src/flask/app.py:446-450
+    - src/flask/app.py:187-187
+  expected_commits:
+    - 4f7156f2
+  reference_answer: >-
+    Коммит 4f7156f2 "configure and check trusted_hosts" (David Lord, 2024-11-12), Flask
+    3.1.0. Он добавил конфиг TRUSTED_HOSTS и в create_url_adapter: если конфиг задан, он
+    присваивается request.trusted_hosts, а request.host вычисляется через werkzeug get_host с
+    проверкой доверенных хостов.
+  notes: "git blame -L 446,450 и -L 187,187 src/flask/app.py; git show 4f7156f2 -- src/flask/app.py."
+
+- id: q32
+  type: history
+  question: "В каком коммите появились лимиты на размер данных формы и возможность задавать лимиты для отдельного запроса?"
+  expected_files:
+    - src/flask/wrappers.py
+    - src/flask/app.py
+  expected_symbols:
+    - Request.max_content_length
+    - Request.max_form_memory_size
+    - Request.max_form_parts
+  expected_ranges:
+    - src/flask/wrappers.py:59-144
+    - src/flask/app.py:199-200
+  expected_commits:
+    - c7a53888
+  reference_answer: >-
+    Коммит c7a53888 "add config and docs for limits" (David Lord, 2024-11-01), Flask 3.1.0.
+    Он добавил конфиги MAX_FORM_MEMORY_SIZE и MAX_FORM_PARTS и переписал в Request свойства
+    max_content_length, max_form_memory_size и max_form_parts с setter'ами для отдельного
+    запроса.
+  notes: "git blame -L 80,90 и -L 92,144 src/flask/wrappers.py, -L 199,200 src/flask/app.py -> c7a53888; git tag --contains -> 3.1.0."
