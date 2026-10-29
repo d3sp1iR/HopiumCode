@@ -122,3 +122,107 @@ def test_big_file_truncated_to_8000_chars(repo):
 def test_header_is_citation_for_orchestrator(repo):
     from hopiumcode.orchestrator import parse_citations
     assert parse_citations(server.read_file(repo, "app.py", 10, 20))[0][:3] == ("app.py", 10, 20)
+
+
+# --------------------------------------------------------------------------- git
+
+def _git(cwd, *args, date=None):
+    import subprocess
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Alice", "GIT_AUTHOR_EMAIL": "a@example.com",
+           "GIT_COMMITTER_NAME": "Alice", "GIT_COMMITTER_EMAIL": "a@example.com"}
+    if date:
+        env |= {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+    subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Git-репозиторий, корень инструментов в подкаталоге src/ (как data/repo/flask/src/flask)."""
+    top = tmp_path / "proj"
+    src = top / "src"
+    src.mkdir(parents=True)
+    _git(top, "init", "-q", "-b", "main")
+    (src / "app.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    _git(top, "add", ".")
+    _git(top, "commit", "-q", "-m", "добавлен app.py", date="2024-01-02T10:00:00+03:00")
+    (src / "app.py").write_text("def a():\n    return 2\n\n\ndef b():\n    return 3\n", encoding="utf-8")
+    _git(top, "commit", "-q", "-am", "изменён a, добавлен b\n\nподробности в теле", date="2024-02-03T11:30:00+00:00")
+    (src / "other.py").write_text("x = 1\n", encoding="utf-8")
+    _git(top, "add", ".")
+    _git(top, "commit", "-q", "-m", "other", date="2024-03-04T12:00:00+00:00")
+    return src
+
+
+def test_git_log_format_newest_first(git_repo):
+    out = server.git_log(git_repo, "app.py")
+    rows = out.splitlines()[1:]
+    assert len(rows) == 2                                       # коммит other.py не трогал app.py
+    sha, author, date, subject = rows[0].split(" | ")
+    assert len(sha) == 7 and author == "Alice"
+    assert date == "2024-02-03T11:30:00+00:00" and subject == "изменён a, добавлен b"
+    assert rows[1].endswith("2024-01-02T10:00:00+03:00 | добавлен app.py")
+
+
+def test_git_log_limit(git_repo):
+    assert len(server.git_log(git_repo, "app.py", n=1).splitlines()) == 2
+
+
+def test_git_blame_line(git_repo):
+    first = server.git_blame(git_repo, "app.py", 1)
+    assert first.startswith("[app.py:1-1] коммит") and "добавлен app.py" in first and "Alice" in first
+    assert "2024-01-02T10:00:00+03:00" in first and first.splitlines()[1] == "   1| def a():"
+    second = server.git_blame(git_repo, "app.py", 2)
+    assert "изменён a, добавлен b" in second and "return 2" in second
+
+
+def test_git_blame_uncommitted(git_repo):
+    (git_repo / "app.py").write_text("def a():\n    return 99\n", encoding="utf-8")
+    assert "не закоммичена" in server.git_blame(git_repo, "app.py", 2)
+
+
+@pytest.mark.parametrize("call, text", [
+    (lambda r: server.git_blame(r, "app.py", 100), "вне диапазона"),
+    (lambda r: server.git_blame(r, "app.py", 0), "вне диапазона"),
+    (lambda r: server.git_blame(r, "missing.py", 1), "файл не найден"),
+    (lambda r: server.git_log(r, "missing.py"), "файл не найден"),
+    (lambda r: server.git_log(r, "../outside.py"), "путь вне репозитория"),
+    (lambda r: server.git_blame(r, "/etc/passwd", 1), "путь вне репозитория"),
+])
+def test_git_errors_as_text(git_repo, call, text):
+    out = call(git_repo)
+    assert out.startswith("Ошибка:") and text in out
+
+
+def test_git_not_a_repo(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    out = server.git_log(tmp_path, "a.py")
+    assert out.startswith("Ошибка:") and "git-репозитории" in out
+
+
+def test_git_timeout_and_missing_git(git_repo, monkeypatch):
+    import subprocess
+
+    def timeout(*a, **kw):
+        raise subprocess.TimeoutExpired("git", server.GIT_TIMEOUT)
+    monkeypatch.setattr(server.subprocess, "run", timeout)
+    assert "не ответил за 10 c" in server.git_log(git_repo, "app.py")
+
+    def missing(*a, **kw):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(server.subprocess, "run", missing)
+    assert "git не установлен" in server.git_blame(git_repo, "app.py", 1)
+
+
+def test_git_called_without_shell(git_repo, monkeypatch):
+    import subprocess
+    calls = []
+    real = subprocess.run
+
+    def spy(args, **kw):
+        calls.append((args, kw))
+        return real(args, **kw)
+    monkeypatch.setattr(server.subprocess, "run", spy)
+    server.git_log(git_repo, "app.py; rm -rf /")                # имя файла не исполняется
+    server.git_log(git_repo, "app.py")
+    args, kw = calls[-1]
+    assert isinstance(args, list) and not kw.get("shell") and kw["timeout"] == 10 and kw["cwd"] == git_repo.resolve()
