@@ -1,7 +1,21 @@
-"""Команда index: векторы (участник 2) и граф (участник 3). Владелец: участник 2."""
+"""Сборка графа одной командой"""
 from __future__ import annotations
 
+from collections import Counter
 
-def build_all() -> None:
-    """Загрузка -> фрагменты -> эмбеддинги -> Chroma + BM25; затем граф. Инкрементально, по хэшам файлов."""
-    raise NotImplementedError("участники 2 и 3")
+from ..config import Config
+from .extract import extract
+from .store import open_store
+
+
+def build_graph(config: Config | None = None) -> dict[str, dict[str, int]]:
+    cfg = config or Config.from_env()
+    nodes, edges = extract(cfg.repo_root)
+    store = open_store(cfg)
+    store.add_nodes(nodes)
+    store.add_edges(edges)
+    store.save()
+    return {
+        "nodes": dict(Counter(n.type for n in nodes)),
+        "edges": dict(Counter(e.type for e in edges)),
+    }
