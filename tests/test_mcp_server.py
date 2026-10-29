@@ -226,3 +226,82 @@ def test_git_called_without_shell(git_repo, monkeypatch):
     server.git_log(git_repo, "app.py")
     args, kw = calls[-1]
     assert isinstance(args, list) and not kw.get("shell") and kw["timeout"] == 10 and kw["cwd"] == git_repo.resolve()
+
+
+# --------------------------------------------------------------------------- search_code и find_callers
+
+@pytest.fixture
+def calls_repo(tmp_path):
+    root = tmp_path / "calls"
+    (root / "pkg").mkdir(parents=True)
+    (root / "validation.py").write_text("def validate(x):\n    return x\n", encoding="utf-8")
+    (root / "pkg" / "app.py").write_text(
+        "from validation import validate\n\n\n"
+        "class Service:\n"
+        "    @staticmethod\n"
+        "    def register(x):\n"
+        "        # validate(x) в комментарии не считается\n"
+        "        return validate(x)\n\n\n"
+        "def main():\n"
+        "    return Service.register(1)\n", encoding="utf-8")
+    return root
+
+
+def test_search_code_stub_is_marked(calls_repo, capsys):
+    out = server.search_code(calls_repo, "где проверяется ввод", 2)
+    assert out.startswith("⚠ ЗАГЛУШКА") and "участник 3" in out
+    assert "⚠ ЗАГЛУШКА" in capsys.readouterr().err
+    from hopiumcode.orchestrator import parse_citations
+    assert parse_citations(out) == []                          # демо-ссылки не становятся источниками
+
+
+def test_search_code_real_retrieve_format(calls_repo, monkeypatch):
+    from hopiumcode.models import Chunk, Hit
+    seen = []
+
+    def retrieve(q, k, mode):
+        seen.append((q, k, mode))
+        c = Chunk("pkg/app.py::Service.register", "pkg/app.py", 5, 8, "method", "Service.register",
+                  "    @staticmethod\n    def register(x):\n" + "        return validate(x)  " * 20, "python")
+        return [Hit(c, 0.9, "vector+bm25")]
+
+    monkeypatch.setattr("hopiumcode.retrieval.hybrid.retrieve", retrieve)
+    out = server.search_code(calls_repo, "register", 50)
+    row = out.splitlines()[1]
+    ref, kind, name, text = row.split(" | ", 3)
+    assert (ref, kind, name) == ("[pkg/app.py:5-8]", "method", "Service.register")
+    assert len(text) <= 120 and "\n" not in text
+    assert seen == [("register", server.MAX_K, "hybrid")]
+    from hopiumcode.orchestrator import parse_citations
+    assert parse_citations(out)[0][:3] == ("pkg/app.py", 5, 8)
+
+
+def test_search_code_empty_query(calls_repo):
+    assert server.search_code(calls_repo, "  ").startswith("Ошибка:")
+
+
+def test_find_callers_text_fallback(calls_repo, capsys):
+    out = server.find_callers(calls_repo, "validate")
+    assert "граф кода не реализован" in out and "текстовым поиском" in capsys.readouterr().err
+    rows = out.splitlines()[2:]
+    assert rows == ["[pkg/app.py:5-8] | Service.register"]      # комментарий и import не считаются
+
+
+def test_find_callers_depth_2(calls_repo):
+    rows = server.find_callers(calls_repo, "validate", depth=2).splitlines()[2:]
+    assert rows[0].startswith("[pkg/app.py:5-8] | Service.register (уровень 1")
+    assert rows[1].startswith("[pkg/app.py:11-12] | main (уровень 2, вызывает register)")
+
+
+def test_find_callers_qualified_name_and_not_found(calls_repo):
+    assert "[pkg/app.py:11-12] | main" in server.find_callers(calls_repo, "Service.register")
+    assert "не найдено" in server.find_callers(calls_repo, "nobody_calls_me")
+    assert server.find_callers(calls_repo, "rm -rf /").startswith("Ошибка:")
+
+
+def test_find_callers_uses_graph_when_ready(calls_repo, monkeypatch):
+    monkeypatch.setattr(server, "_graph_callers",
+                        lambda root, symbol, depth: ["pkg/app.py::Service.register", "unknown::thing"])
+    out = server.find_callers(calls_repo, "validate")
+    assert "граф кода" in out.splitlines()[0] and "⚠" not in out
+    assert out.splitlines()[1:] == ["[pkg/app.py:5-8] | Service.register", "unknown::thing | (строки не найдены)"]

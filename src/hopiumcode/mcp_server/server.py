@@ -10,8 +10,11 @@ SDK: пакет mcp 2.x, класс MCPServer (в mcp 1.x он называлс�
 """
 from __future__ import annotations
 
+import ast
 import os
+import re
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -24,6 +27,9 @@ MAX_CHARS = 8000
 DEFAULT_LINES = 200
 MAX_LINES = 400
 GIT_TIMEOUT = 10
+MAX_K = 20
+MAX_DEPTH = 3
+MAX_CALLERS = 50
 MAX_LOG = 50
 READ_SUFFIXES = {".py"}  # решение команды: в индексе и ссылках только .py
 
@@ -32,6 +38,8 @@ DESCRIPTIONS = {
     "read_file": "Прочитать строки файла репозитория с номерами.",
     "git_log": "Последние коммиты, менявшие файл.",
     "git_blame": "Кто и в каком коммите последним менял строку файла.",
+    "search_code": "Поиск фрагментов кода по смыслу вопроса.",
+    "find_callers": "Кто вызывает функцию или метод.",
 }
 ARGS = {
     "path": "Путь к файлу относительно корня репозитория, например app.py или sansio/scaffold.py.",
@@ -40,6 +48,10 @@ ARGS = {
                 f"за один вызов не больше {MAX_LINES} строк.",
     "n": f"Сколько последних коммитов показать (1-{MAX_LOG}), по умолчанию 5.",
     "line": "Номер строки файла (с 1).",
+    "query": "Что ищем: вопрос или ключевые слова, лучше с английскими именами из кода.",
+    "k": f"Сколько фрагментов вернуть (1-{MAX_K}), по умолчанию 5.",
+    "symbol": "Имя функции или метода, например make_response или Flask.make_response.",
+    "depth": f"Глубина: 1 — прямые вызывающие, 2 — и их вызывающие (до {MAX_DEPTH}).",
 }
 
 
@@ -229,6 +241,174 @@ def git_blame(root: Path, path: str, line: int) -> str:
             f"{line:>4}| {content}")
 
 
+# --------------------------------------------------------------------------- поиск и граф (участники 2 и 3)
+
+def _warn(text: str) -> str:
+    print(f"⚠ {text}", file=sys.stderr)
+    return f"⚠ {text}"
+
+
+def _short(text: str, limit: int = 120) -> str:
+    one = " ".join(text.split())
+    return one if len(one) <= limit else one[:limit - 1] + "…"
+
+
+def _fit(lines: list[str]) -> str:
+    out, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > MAX_CHARS - 60:
+            out.append(f"… обрезано по лимиту {MAX_CHARS} символов")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
+def search_code(root: Path, query: str, k: int = 5) -> str:
+    """Фрагменты через retrieval.hybrid.retrieve: "[путь:начало-конец] | kind | имя | первые 120 символов"."""
+    if not (query or "").strip():
+        return _error("пустой запрос")
+    k = max(1, min(int(k or 5), MAX_K))
+    from ..retrieval.hybrid import retrieve
+    header = f"search_code {query!r}, найдено фрагментов: {{n}}"
+    try:
+        hits = retrieve(query, k, "hybrid")
+        stub = False
+    except NotImplementedError as ex:
+        from ..stubs import stub_retrieve
+        hits = stub_retrieve(query, k, "hybrid")
+        stub = True
+        header = _warn(f"ЗАГЛУШКА: retrieval.hybrid.retrieve не реализован ({ex}); ниже демо-фрагменты не из "
+                       "репозитория, ссылаться на них нельзя") + "\n" + header
+    if not hits:
+        return header.format(n=0) + "\nНичего не найдено. Уточните запрос именами из кода."
+    rows = []
+    for h in hits[:k]:
+        c = h.chunk
+        ref = f"{c.path}:{c.start_line}-{c.end_line}"
+        ref = ref if stub else f"[{ref}]"  # демо-ссылки без скобок: оркестратор не примет их как источник
+        rows.append(f"{ref} | {c.kind} | {c.name or 'module'} | {_short(c.text)}")
+    return _fit([header.format(n=len(rows)), *rows])
+
+
+def _defs(tree: ast.AST) -> list[tuple[int, int, str]]:
+    """(начало с декораторами, конец, qualified name) всех функций и методов файла."""
+    out = []
+
+    def walk(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                start = min([child.lineno] + [d.lineno for d in child.decorator_list])
+                out.append((start, child.end_lineno, f"{prefix}{child.name}"))
+                walk(child, f"{prefix}{child.name}.")
+            else:
+                walk(child, prefix)
+    walk(tree, "")
+    return out
+
+
+def _py_files(root: Path):
+    for p in sorted(root.rglob("*.py")):
+        rel = p.relative_to(root)
+        if "__pycache__" in rel.parts or any(part.startswith(".") for part in rel.parts):
+            continue
+        if p.resolve().is_relative_to(root):
+            yield p
+
+
+def _parse(path: Path):
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError, OSError):
+        return None
+
+
+def _locate(root: Path, rel: str, qualname: str) -> tuple[int, int] | None:
+    try:
+        full = resolve_path(root, rel)
+    except ToolInputError:
+        return None
+    tree = _parse(full) if full.is_file() else None
+    for start, end, name in _defs(tree) if tree else []:
+        if name == qualname:
+            return start, end
+    return None
+
+
+def _text_callers(root: Path, name: str) -> list[tuple[str, int, int, str]]:
+    """Функции, в теле которых встречается вызов name( — эвристика вместо графа."""
+    call = re.compile(rf"(?<![\w]){re.escape(name)}\s*\(")
+    own_def = re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(name)}\b")
+    found: dict[tuple[str, str], tuple[int, int]] = {}
+    for path in _py_files(root):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if name not in text:
+            continue
+        tree = _parse(path)
+        defs = _defs(tree) if tree else []
+        rel = _rel(root, path)
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#") or own_def.match(line) or not call.search(line):
+                continue
+            inner = [d for d in defs if d[0] <= n <= d[1]]
+            if inner:
+                start, end, qual = max(inner, key=lambda d: d[0])  # самая вложенная функция
+            else:
+                start, end, qual = n, n, "<код модуля>"
+            found.setdefault((rel, qual), (start, end))
+    return [(rel, s, e, q) for (rel, q), (s, e) in sorted(found.items(), key=lambda x: (x[0][0], x[1][0]))]
+
+
+def _graph_callers(root: Path, symbol: str, depth: int) -> list[str]:
+    from ..graph.query import callers
+    return list(callers(symbol, depth))
+
+
+def find_callers(root: Path, symbol: str, depth: int = 1) -> str:
+    """Вызывающие функции: "[путь:начало-конец] | имя вызывающей функции"."""
+    root = Path(root).resolve()
+    symbol = (symbol or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][\w.]*", symbol):
+        return _error(f"нужно имя функции или метода, например make_response, а не {symbol!r}")
+    depth = max(1, min(int(depth or 1), MAX_DEPTH))
+    try:
+        ids = _graph_callers(root, symbol, depth)
+    except NotImplementedError as ex:
+        return _find_callers_by_text(root, symbol, depth, ex)
+    rows = []
+    for node_id in ids[:MAX_CALLERS]:
+        rel, sep, qual = node_id.partition("::")
+        span = _locate(root, rel, qual) if sep else None
+        rows.append(f"[{rel}:{span[0]}-{span[1]}] | {qual}" if span else f"{node_id} | (строки не найдены)")
+    if not rows:
+        return f"Граф: вызывающих {symbol} не найдено."
+    return _fit([f"find_callers {symbol} (граф кода, глубина {depth}), найдено: {len(rows)}", *rows])
+
+
+def _find_callers_by_text(root: Path, symbol: str, depth: int, ex: Exception) -> str:
+    warn = _warn(f"граф кода не реализован ({ex}): вызывающие найдены текстовым поиском '{symbol.split('.')[-1]}(' "
+                 "по .py-файлам, возможны ложные совпадения и пропуски")
+    rows, seen = [], set()
+    frontier = [symbol.split(".")[-1]]
+    for level in range(1, depth + 1):
+        nxt = []
+        for name in frontier:
+            for rel, start, end, qual in _text_callers(root, name):
+                if (rel, qual) in seen:
+                    continue
+                seen.add((rel, qual))
+                suffix = f" (уровень {level}, вызывает {name})" if depth > 1 else ""
+                rows.append(f"[{rel}:{start}-{end}] | {qual}{suffix}")
+                if qual != "<код модуля>":
+                    nxt.append(qual.split(".")[-1])
+        frontier = nxt
+    if not rows:
+        return f"{warn}\nВызовов {symbol} не найдено."
+    return _fit([warn, f"find_callers {symbol}, найдено: {len(rows)}", *rows[:MAX_CALLERS]])
+
+
 def create_server(root: Path | None = None) -> MCPServer:
     root = Path(root or get_root()).resolve()
     server = MCPServer(SERVER_NAME, instructions=f"Инструменты чтения кода репозитория (корень {root.name}).",
@@ -249,6 +429,16 @@ def create_server(root: Path | None = None) -> MCPServer:
     def _git_blame(path: Annotated[str, Field(description=ARGS["path"])],
                    line: Annotated[int, Field(description=ARGS["line"])]) -> str:
         return git_blame(root, path, line)
+
+    @server.tool(name="search_code", description=DESCRIPTIONS["search_code"])
+    def _search_code(query: Annotated[str, Field(description=ARGS["query"])],
+                     k: Annotated[int, Field(description=ARGS["k"])] = 5) -> str:
+        return search_code(root, query, k)
+
+    @server.tool(name="find_callers", description=DESCRIPTIONS["find_callers"])
+    def _find_callers(symbol: Annotated[str, Field(description=ARGS["symbol"])],
+                      depth: Annotated[int, Field(description=ARGS["depth"])] = 1) -> str:
+        return find_callers(root, symbol, depth)
 
     return server
 
