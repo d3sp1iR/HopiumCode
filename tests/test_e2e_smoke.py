@@ -111,6 +111,12 @@ def test_index_without_sources_hints_fetch(tmp_path, monkeypatch, capsys):
 def test_index_falls_back_to_stub(tmp_path, monkeypatch, capsys):
     (tmp_path / "a.py").write_text("x = 1\n")
     monkeypatch.setenv("CG_REPO_ROOT", str(tmp_path))
+
+    def not_ready():
+        raise NotImplementedError("участники 2 и 3")
+
+    # build_all уже реализован (зона 2); проверяем сам механизм отката cli на заглушку
+    monkeypatch.setattr("hopiumcode.indexing.build.build_all", not_ready)
     assert cli.main(["index"]) == 0
     out = capsys.readouterr()
     assert "indexing.build.build_all" in out.err and "1" in out.out
