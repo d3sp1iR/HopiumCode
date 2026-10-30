@@ -188,3 +188,30 @@ def test_find_callers_graph_not_ready(repo, monkeypatch):
     monkeypatch.setattr(server, "_get_graph", missing)
     with pytest.raises(ToolInputError, match="граф кода ещё не готов"):
         find_callers_impl("open_session")
+
+
+def test_find_callers_graph_not_built(repo, monkeypatch):
+    def not_built():
+        raise FileNotFoundError("граф не построен: data/graph/graph.json")
+
+    monkeypatch.setattr(server, "_get_graph", not_built)
+    with pytest.raises(ToolInputError, match="make index"):
+        find_callers_impl("open_session")
+
+
+def test_search_code_index_not_built(repo, monkeypatch):
+    from hopiumcode.indexing.vectorstore import IndexNotBuilt
+
+    def empty(query, k):
+        raise IndexNotBuilt("Векторный индекс пуст: выполните `make index`")
+
+    monkeypatch.setattr(server, "_retrieve", empty)
+    with pytest.raises(ToolInputError, match="make index"):
+        server.search_code_impl("сессия")
+
+
+def test_get_graph_uses_participant3_loader(tmp_path, monkeypatch):
+    from hopiumcode.graph import query
+    sentinel = object()
+    monkeypatch.setattr(query, "get_store", lambda: sentinel)
+    assert server._get_graph() is sentinel

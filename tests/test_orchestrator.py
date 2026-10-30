@@ -145,3 +145,110 @@ def test_ollama_adapter_parses_object_response(monkeypatch):
     resp = NS(message=NS(content="Привет", tool_calls=[NS(function=NS(name="git_log", arguments='{"path": "a.py"}'))]))
     r = _ollama_chat_with(resp, monkeypatch).chat([])
     assert r.tool_calls[0].args == {"path": "a.py"} and r.content == "Привет"
+
+
+# --- запасные вызовы инструментов и повтор без ссылок ---------------------------------
+from hopiumcode.orchestrator import is_refusal, rule_tool_call, text_tool_calls  # noqa: E402
+
+KNOWN = {"search_code", "read_file", "find_callers", "git_log", "git_blame"}
+
+
+def test_text_tool_call_json_and_function_syntax():
+    js = 'Вызовем:\n```json\n{"tool": "git_log", "arguments": {"path": "ctx.py", "n": 5}}\n```'
+    assert text_tool_calls(js, KNOWN) == [ToolCall("git_log", {"path": "ctx.py", "n": 5})]
+    fn = 'Нужно вызвать find_callers(symbol="make_response", depth=2).'
+    assert text_tool_calls(fn, KNOWN) == [ToolCall("find_callers", {"symbol": "make_response", "depth": 2})]
+    assert text_tool_calls('{"tool": "rm_rf", "arguments": {}}', KNOWN) == []     # неизвестный инструмент
+    assert text_tool_calls("вызовите find_callers с параметром symbol", KNOWN) == []
+
+
+def test_rule_tool_call_by_question_type():
+    assert rule_tool_call("Кто последним менял файл src/flask/ctx.py?", "history", KNOWN) == \
+        ToolCall("git_log", {"path": "src/flask/ctx.py", "n": 5})
+    assert rule_tool_call("Кто вызывает App._find_error_handler?", "graph", KNOWN) == \
+        ToolCall("find_callers", {"symbol": "App._find_error_handler", "depth": 1})
+    assert rule_tool_call("Кто вызывает handle_user_exception?", "graph", KNOWN).args["symbol"] == \
+        "handle_user_exception"
+    assert rule_tool_call("От чего наследуется MethodView?", "graph", KNOWN) is None   # не про вызовы
+    assert rule_tool_call("Кто менял этот файл?", "history", KNOWN) is None           # путь неизвестен
+    assert rule_tool_call("Кто вызывает handle_user_exception?", "graph", set()) is None
+
+
+def test_model_writes_tool_call_as_text_and_orchestrator_runs_it():
+    m = Seq(ModelReply('{"tool": "read_file", "arguments": {"path": "app/x.py"}}'),
+            ModelReply("Нашёл [app/x.py:1-1]."))
+    t = Tools()
+    a = agent(m, t).answer("Покажи файл app/x.py")
+    assert t.called == [("read_file", {"path": "app/x.py"})] and a.used_tools == ["read_file"]
+    assert a.citations == ["[app/x.py:1-1]"]
+
+
+def test_rule_call_when_model_ignores_tools():
+    class GitTools(Tools):
+        def list_tools_for_ollama(self):
+            return [{"type": "function", "function": {"name": "git_log", "parameters": {}}}]
+
+        def call_tool(self, name, args):
+            self.called.append((name, args))
+            return "abc1234 | Alice | 2024-01-01T00:00:00+00:00 | правка ctx"
+
+    m = Seq(ModelReply("В найденном контексте ответа нет."), ModelReply("Последний коммит abc1234 от Alice."))
+    t = GitTools()
+    a = agent(m, t).answer("Кто последним менял файл ctx.py?")
+    assert t.called == [("git_log", {"path": "ctx.py", "n": 5})] and a.used_tools == ["git_log"]
+
+
+def test_answer_without_citations_gets_one_repair():
+    m = Seq(ModelReply("Подключение происходит в connect."), ModelReply(f"Подключение в connect {REF}."))
+    a = agent(m).answer("Где подключение?")
+    assert a.citations == [REF] and a.steps == 2
+    assert "строго в формате" in m.calls[1][0][-1]["content"]
+
+
+def test_refusal_is_not_repaired():
+    m = Seq(ModelReply("В найденном контексте ответа нет."))
+    a = agent(m).answer("Где rate limiting?")
+    assert a.steps == 1 and is_refusal(a.text)
+
+
+def test_repair_that_loses_citations_is_ignored():
+    m = Seq(ModelReply(f"Ответ {REF} и [no/such.py:1-2]."), ModelReply("Без ссылок."))
+    a = agent(m).answer("q")
+    assert a.citations == [REF]                                 # исправление хуже исходного: оставляем исходный
+
+
+def test_strip_thinking():
+    from hopiumcode.orchestrator import strip_thinking
+    assert strip_thinking("<think>план</think>\nОтвет [a.py:1-2]") == "Ответ [a.py:1-2]"
+    assert strip_thinking("рассуждения без тега...\n</think>\nОтвет") == "Ответ"   # так пишет qwen3 с think=False
+    assert strip_thinking("Просто ответ") == "Просто ответ"
+
+
+def test_ollama_chat_disables_qwen3_thinking():
+    from hopiumcode.orchestrator import OllamaChat
+    seen = []
+
+    class FakeClient:
+        def chat(self, **kw):
+            seen.append(kw)
+            return {"message": {"content": "мысли</think>Ответ", "tool_calls": []}}
+
+    chat = OllamaChat.__new__(OllamaChat)
+    chat.model, chat.think, chat._client = "qwen3:4b", False, FakeClient()
+    reply = chat.chat([{"role": "system", "content": "S"}, {"role": "user", "content": "Q"}])
+    assert reply.content == "Ответ"
+    assert seen[0]["think"] is False and seen[0]["messages"][0]["content"].endswith("/no_think")
+    assert seen[0]["options"] == {"temperature": 0}
+
+
+def test_history_answer_from_git_is_not_forced_to_cite_code():
+    class GitTools(Tools):
+        def list_tools_for_ollama(self):
+            return [{"type": "function", "function": {"name": "git_log", "parameters": {}}}]
+
+        def call_tool(self, name, args):
+            return "abc1234 | Alice | 2024-01-01T00:00:00+00:00 | правка"
+
+    m = Seq(ModelReply("Последний коммит abc1234 от Alice."))
+    a = agent(m, GitTools()).answer("Кто последним менял файл ctx.py?")
+    assert a.steps == 1 and "abc1234" in a.text                # без повторной просьбы о ссылках

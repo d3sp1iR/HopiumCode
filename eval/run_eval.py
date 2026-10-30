@@ -8,6 +8,7 @@ python -m eval.run_eval [--mode hybrid|vector|vector+bm25|all] [--fake] [--only 
   hit_files           доля expected_files среди найденных фрагментов и подтверждённых ссылок ответа
   citations_verified  подтверждено ссылок / всего ссылок в ответе (None, если ссылок нет)
   answered            trap: агент сказал, что не нашёл, и не дал ни одной ссылки;
+                      history: в ответе есть эталонный коммит (expected_commits) или подтверждённая ссылка;
                       остальные типы: есть хотя бы одна подтверждённая ссылка
   latency_s, steps, tool_calls
   judge               (--judge) оценка LLM-судьи 0/1/2 по эталону, промпт П5.3
@@ -116,6 +117,10 @@ def score(q: dict, answer, ranked_paths: Iterable[str], to_target: Callable[[str
     total = len(answer.citations) + len(answer.bad_citations)
     if q["type"] == "trap":
         answered = total == 0 and is_refusal(answer.text)
+    elif q["type"] == "history" and q.get("expected_commits"):
+        # ответ по истории ссылается на коммит, а не на строки кода
+        text = answer.text.lower()
+        answered = any(c[:7].lower() in text for c in q["expected_commits"]) or bool(answer.citations)
     else:
         answered = bool(answer.citations)
     return {

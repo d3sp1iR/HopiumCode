@@ -47,6 +47,24 @@ def test_modes_and_graph_adds_callers(tmp_path):
     assert all(0 <= h.score <= 1 for h in hybrid)
 
 
+def test_callers_survive_char_budget(tmp_path):
+    # Узкий лимит символов: без квоты графа вызывающие вытеснялись прямыми совпадениями поиска.
+    retriever, _ = build(tmp_path)
+    retriever.max_chars = 120
+    hybrid = retriever.retrieve("open_socket addr", k=4, mode="hybrid")
+    ids = [h.chunk.id for h in hybrid]
+    assert ids[0] == "net.py::open_socket"
+    assert {"client.py::fetch", "client.py::ping"} <= set(ids)
+
+
+def test_query_expansion_is_applied(tmp_path):
+    retriever, _ = build(tmp_path)
+    seen = []
+    retriever.expand_query = lambda q: seen.append(q) or q + " open_socket"
+    hits = retriever.retrieve("где открывается сокет", k=2, mode="vector+bm25")
+    assert seen == ["где открывается сокет"] and hits[0].chunk.id == "net.py::open_socket"
+
+
 def test_unknown_mode(tmp_path):
     retriever, _ = build(tmp_path)
     try:

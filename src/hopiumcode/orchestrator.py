@@ -13,13 +13,13 @@ import logging
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 from .config import Config
 from .models import Answer, Hit
-from .prompts import ENRICHED_TEMPLATE, REPAIR_TEMPLATE, SYSTEM_PROMPT
+from .prompts import CITE_TEMPLATE, ENRICHED_TEMPLATE, REPAIR_TEMPLATE, SYSTEM_PROMPT
 
 log = logging.getLogger("hopiumcode")
 
@@ -117,6 +117,14 @@ class ChatModel(Protocol):
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
+def strip_thinking(content: str) -> str:
+    """Убирает размышления модели: блоки <think>…</think> и всё до последнего «</think>» без открывающего тега."""
+    content = _THINK_RE.sub("", content)
+    if "</think>" in content:
+        content = content.rsplit("</think>", 1)[1]
+    return content.strip()
+
+
 def _get(obj, key, default=None):
     """Достаёт поле и из объекта, и из словаря (формат ответа Ollama зависит от версии пакета)."""
     if isinstance(obj, dict):
@@ -127,17 +135,29 @@ def _get(obj, key, default=None):
 class OllamaChat:
     """Адаптер к локальной модели через пакет ollama. Температура 0 для повторяемости оценки."""
 
-    def __init__(self, model: str, host: str | None = None) -> None:
+    def __init__(self, model: str, host: str | None = None, think: bool | None = False) -> None:
         import ollama  # импорт здесь, чтобы тесты работали без пакета
 
         self.model = model
+        self.think = think  # None: не передавать (модель без режима размышлений)
         self._client = ollama.Client(host=host) if host else ollama.Client()
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> ModelReply:
-        resp = self._client.chat(model=self.model, messages=messages, tools=tools or None,
-                                 options={"temperature": 0})
+        kwargs = {} if self.think is None else {"think": self.think}
+        if not self.think and "qwen3" in self.model and messages and messages[0].get("role") == "system":
+            # мягкий переключатель qwen3: без него модель «думает» в ответе даже при think=False
+            messages = [{**messages[0], "content": messages[0]["content"] + "\n/no_think"}, *messages[1:]]
+        try:
+            resp = self._client.chat(model=self.model, messages=messages, tools=tools or None,
+                                     options={"temperature": 0}, **kwargs)
+        except Exception as ex:
+            if self.think is None or "think" not in str(ex).lower():
+                raise
+            self.think = None  # модель не поддерживает параметр think: повторяем без него
+            resp = self._client.chat(model=self.model, messages=messages, tools=tools or None,
+                                     options={"temperature": 0})
         msg = _get(resp, "message")
-        content = _THINK_RE.sub("", _get(msg, "content", "") or "").strip()
+        content = strip_thinking(_get(msg, "content", "") or "")
         calls = []
         for tc in _get(msg, "tool_calls", None) or []:
             fn = _get(tc, "function")
@@ -149,6 +169,59 @@ class OllamaChat:
                     args = {}
             calls.append(ToolCall(_get(fn, "name"), dict(args)))
         return ModelReply(content, calls)
+
+
+# --------------------------------------------------------------------------- запасные вызовы инструментов
+
+TOOL_NAMES = ("search_code", "read_file", "find_callers", "git_log", "git_blame")
+_JSON_OBJ_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", re.DOTALL)
+_FUNC_CALL_RE = re.compile(r"\b(" + "|".join(TOOL_NAMES) + r")\s*\(([^()]*)\)")
+_KWARG_RE = re.compile(r"(\w+)\s*=\s*(\"[^\"]*\"|'[^']*'|-?\d+)")
+_PATH_RE = re.compile(r"[\w./-]+\.py\b")
+_SYMBOL_RE = re.compile(r"`?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[A-Za-z]\w*_\w+|[A-Z][a-z]+[A-Z]\w*)`?")
+_CALLER_WORDS = ("вызывает", "вызывается", "что сломается", "где используется", "кто использует")
+_REFUSAL_RE = re.compile(r"ответа\s+нет|не\s+наш(ё|е)л|не\s+найден|нет\s+(в\s+(коде|контексте)|информации)",
+                         re.IGNORECASE)
+
+
+def text_tool_calls(content: str, known: set[str]) -> list[ToolCall]:
+    """Вызов инструмента, который маленькая модель написала текстом, а не через tool_calls.
+
+    Понимает JSON вида {"tool"|"name": ..., "arguments"|"args"|"parameters": {...}} и запись name(arg=...).
+    """
+    for m in _JSON_OBJ_RE.finditer(content or ""):
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            name = obj.get("tool") or obj.get("name") or obj.get("function")
+            args = obj.get("arguments") or obj.get("args") or obj.get("parameters") or {}
+            if name in known and isinstance(args, dict):
+                return [ToolCall(name, dict(args))]
+    for m in _FUNC_CALL_RE.finditer(content or ""):
+        if m.group(1) in known:
+            args = {k: int(v) if v.lstrip("-").isdigit() else v[1:-1] for k, v in _KWARG_RE.findall(m.group(2))}
+            return [ToolCall(m.group(1), args)]
+    return []
+
+
+def rule_tool_call(question: str, qtype: str, known: set[str]) -> ToolCall | None:
+    """Запасной вариант из ТЗ (раздел 14): если модель не вызвала инструмент сама, вызвать его по типу вопроса."""
+    q = question.lower()
+    if qtype == "history" and "git_log" in known:
+        m = _PATH_RE.search(question)
+        if m:
+            return ToolCall("git_log", {"path": m.group(0), "n": 5})
+    if qtype == "graph" and "find_callers" in known and any(w in q for w in _CALLER_WORDS):
+        m = _SYMBOL_RE.search(question)
+        if m:
+            return ToolCall("find_callers", {"symbol": m.group(1), "depth": 1})
+    return None
+
+
+def is_refusal(text: str) -> bool:
+    return bool(_REFUSAL_RE.search(text or ""))
 
 
 # --------------------------------------------------------------------------- агент
@@ -204,6 +277,22 @@ class Agent:
             _event("tool_error", tool=call.name, error=repr(ex))
             return f"Ошибка инструмента {call.name}: {ex}"
 
+    def _run_calls(self, calls: list[ToolCall], content: str, messages: list[dict],
+                   allowed: list[AllowedRef], used_tools: list[str], step: int) -> None:
+        """Выполняет вызовы инструментов, добавляет их в историю и расширяет допустимые ссылки."""
+        messages.append({"role": "assistant", "content": content,
+                         "tool_calls": [{"function": {"name": c.name, "arguments": c.args}} for c in calls]})
+        for call in calls:
+            result = self._call_tool(call)
+            used_tools.append(call.name)
+            _event("tool_call", step=step, tool=call.name, args=call.args, result_chars=len(result))
+            # ссылки, вернувшиеся от инструментов, тоже считаются источником
+            allowed += [(p, s, e) for p, s, e, _ in parse_citations(result)]
+            if call.name == "read_file" and "path" in call.args:
+                a, b = call.args.get("start_line") or 1, call.args.get("end_line") or 10**9
+                allowed.append((str(call.args["path"]), int(a), int(b)))
+            messages.append({"role": "tool", "tool_name": call.name, "content": result})
+
     def answer(self, question: str, mode: str = "hybrid") -> Answer:
         t0 = time.perf_counter()
         qtype = classify(question)
@@ -220,28 +309,37 @@ class Agent:
             {"role": "user", "content": user},
         ]
         schemas = self._schemas()
+        known = {sch["function"]["name"] for sch in schemas}
         used_tools: list[str] = []
         model_calls = 0
         final = ""
 
+        # Запасной вариант из ТЗ (раздел 14): если путь или символ уже есть в вопросе про историю или вызовы,
+        # оркестратор сам вызывает git_log / find_callers до первого обращения к модели.
+        pre = rule_tool_call(question, qtype, known)
+        if pre:
+            _event("rule_tool_call", tool=pre.name, args=pre.args)
+            self._run_calls([pre], "", messages, allowed, used_tools, step=-1)
+        fallback_used = bool(pre)
+
         for step in range(self.cfg.max_steps):
             reply = self.model.chat(messages, schemas or None)
             model_calls += 1
-            if not reply.tool_calls:
+            calls = reply.tool_calls
+            if not calls and known and not fallback_used:
+                # Маленькая модель пишет вызов текстом или не вызывает инструмент вовсе: тогда вызов делает
+                # оркестратор (по тексту ответа, иначе по типу вопроса). Один раз за ответ.
+                calls = text_tool_calls(reply.content, known)
+                if not calls and not used_tools:
+                    rule = rule_tool_call(question, qtype, known)
+                    calls = [rule] if rule else []
+                if calls:
+                    fallback_used = True
+                    _event("fallback_tool_call", tool=calls[0].name, args=calls[0].args)
+            if not calls:
                 final = reply.content
                 break
-            messages.append({"role": "assistant", "content": reply.content,
-                             "tool_calls": [{"function": {"name": c.name, "arguments": c.args}} for c in reply.tool_calls]})
-            for call in reply.tool_calls:
-                result = self._call_tool(call)
-                used_tools.append(call.name)
-                _event("tool_call", step=step, tool=call.name, args=call.args, result_chars=len(result))
-                # ссылки, вернувшиеся от инструментов, тоже считаются источником
-                allowed += [(p, s, e) for p, s, e, _ in parse_citations(result)]
-                if call.name == "read_file" and "path" in call.args:
-                    a, b = call.args.get("start_line") or 1, call.args.get("end_line") or 10**9
-                    allowed.append((str(call.args["path"]), int(a), int(b)))
-                messages.append({"role": "tool", "tool_name": call.name, "content": result})
+            self._run_calls(calls, reply.content, messages, allowed, used_tools, step)
         else:
             # лимит шагов исчерпан: просим окончательный ответ без инструментов
             messages.append({"role": "user", "content": "Лимит вызовов инструментов исчерпан. Дай ответ по тому, что уже найдено."})
@@ -249,13 +347,17 @@ class Agent:
             model_calls += 1
 
         v = verify_citations(final, allowed)
-        if not v.ok:  # одна попытка исправления
-            _event("repair", bad=v.bad)
-            messages += [{"role": "assistant", "content": final},
-                         {"role": "user", "content": REPAIR_TEMPLATE.format(bad=", ".join(v.bad))}]
-            final = self.model.chat(messages, None).content
+        from_git = any(t in ("git_log", "git_blame") for t in used_tools)  # история: ссылаются на коммиты
+        no_refs = not v.good and not v.bad and bool(allowed) and not is_refusal(final) and not from_git
+        if not v.ok or no_refs:  # одна попытка исправления: чужие ссылки или ответ совсем без ссылок
+            _event("repair", bad=v.bad, no_refs=no_refs)
+            fix = REPAIR_TEMPLATE.format(bad=", ".join(v.bad)) if v.bad else CITE_TEMPLATE
+            messages += [{"role": "assistant", "content": final}, {"role": "user", "content": fix}]
+            repaired = self.model.chat(messages, None).content
             model_calls += 1
-            v = verify_citations(final, allowed)
+            rv = verify_citations(repaired, allowed)
+            if len(rv.good) >= len(v.good):  # исправление не должно терять подтверждённые ссылки
+                final, v = repaired, rv
 
         text = final
         total = len(v.good) + len(v.bad)
@@ -394,7 +496,8 @@ def build_default_agent(config: Config | None = None) -> Agent:
     from .retrieval.hybrid import retrieve
     from .stubs import StubTools, stub_retrieve
 
-    return Agent(OllamaChat(cfg.llm_model, cfg.ollama_url), retrieve_with_fallback(retrieve, stub_retrieve),
+    return Agent(OllamaChat(cfg.llm_model, cfg.ollama_url, think=cfg.think),
+                 retrieve_with_fallback(retrieve, stub_retrieve),
                  ToolsWithFallback(McpClient(), StubTools()), cfg)
 
 

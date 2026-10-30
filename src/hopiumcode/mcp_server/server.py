@@ -109,6 +109,15 @@ def resolve_existing(path: str) -> tuple[Path, Path]:
     root = get_repo_root()
     target = resolve_in_repo(path, root)
     if not target.exists():
+        # Модель часто передаёт путь от корня git (src/flask/ctx.py), а корень инструментов — src/flask:
+        # пробуем отрезать префикс, совпадающий с хвостом корня (проверка «внутри репозитория» та же).
+        norm = path.strip().replace("\\", "/")
+        for i in range(1, len(root.parts)):
+            prefix = "/".join(root.parts[-i:]) + "/"
+            if norm.startswith(prefix) and norm[len(prefix):]:
+                candidate = resolve_in_repo(norm[len(prefix):], root)
+                if candidate.exists():
+                    return root, candidate
         raise ToolInputError(f"файл не найден: {path}")
     return root, target
 
@@ -239,11 +248,16 @@ def search_code_impl(query: str, k: int = 5) -> str:
     if k < 1:
         raise ToolInputError("k должен быть >= 1")
     k = min(k, SEARCH_K_MAX)
+    from hopiumcode.indexing.vectorstore import IndexNotBuilt
     try:
         hits = _retrieve(query, k)
+    except IndexNotBuilt as exc:
+        raise ToolInputError(f"индекс не построен ({exc})") from exc
     except (ImportError, NotImplementedError) as exc:
         raise ToolInputError("поиск ещё не готов: нет retrieval.hybrid.retrieve "
                              "(участник 3) или индекса (участник 2)") from exc
+    except FileNotFoundError as exc:  # граф для режима hybrid ещё не построен
+        raise ToolInputError(f"индекс не построен ({exc}); выполните make index") from exc
 
     blocks = []
     for hit in hits[:k]:
@@ -269,11 +283,11 @@ def search_code_impl(query: str, k: int = 5) -> str:
 def _get_graph():
     """Загруженный GraphStore (контракт: callers(symbol, depth) -> list[str] id).
 
-    СОГЛАСОВАТЬ с участником 3: нужна фабрика в graph/store.py, которая
-    загружает сохранённый граф из data/graph. Имя load_store — предложение.
+    Граф загружает graph.query.get_store() участника 3 из Config.graph_dir (data/graph); если граф не построен,
+    load() бросает FileNotFoundError, и find_callers просит выполнить make index.
     """
-    from hopiumcode.graph.store import load_store
-    return load_store()
+    from hopiumcode.graph.query import get_store
+    return get_store()
 
 
 def _symbol_lines(root: Path, rel_path: str, qualname: str) -> tuple[int, int] | None:
@@ -322,8 +336,10 @@ def find_callers_impl(symbol: str, depth: int = 1) -> str:
     root = get_repo_root()
     try:
         graph = _get_graph()
-    except (ImportError, NotImplementedError, FileNotFoundError) as exc:
+    except (ImportError, NotImplementedError) as exc:
         raise ToolInputError("граф кода ещё не готов (graph/, участник 3)") from exc
+    except FileNotFoundError as exc:
+        raise ToolInputError(f"граф кода не построен ({exc}); выполните make index") from exc
     try:
         ids = graph.callers(symbol, depth=depth)
     except NotImplementedError as exc:

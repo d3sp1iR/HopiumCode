@@ -114,3 +114,12 @@ def test_judge_sends_prompt_reference_and_answer():
     system, user = seen[0]
     assert "Опирайся только на эталон" in system["content"]
     assert "ЭТАЛОН" in user["content"] and "ОТВЕТ" in user["content"]
+
+
+def test_history_answered_by_expected_commit():
+    from eval.run_eval import score
+    from hopiumcode.models import Answer
+    q = {"type": "history", "expected_files": ["src/flask/ctx.py"], "expected_commits": ["c17f3793"]}
+    ok = Answer(text="Последний коммит c17f379 от David Lord", used_tools=["git_log"])
+    assert score(q, ok, [], str)["answered"] is True
+    assert score(q, Answer(text="Не знаю"), [], str)["answered"] is False

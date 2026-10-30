@@ -327,3 +327,13 @@ def test_parse_porcelain():
     assert b["filename"] == "old.py"
     assert b["content"] == "    return x  # таб внутри\tстроки"
     assert _iso_from_git(b["author-time"], b["author-tz"]) == "2023-11-14T16:43:20-05:30"
+
+
+def test_path_from_git_root_is_accepted(repo, monkeypatch):
+    # корень инструментов proj/pkg, а модель передала путь от корня git (pkg/app.py)
+    monkeypatch.setenv("REPO_ROOT", str(repo.root / "pkg"))
+    rows = git_log_impl("pkg/app.py").splitlines()
+    assert len(rows) == 3 and rows[0].endswith("| Add footer")
+    assert len(git_log_impl("app.py").splitlines()) == 3
+    with pytest.raises(Exception, match="вне репозитория"):
+        git_log_impl("pkg/../../outside/secret.txt")

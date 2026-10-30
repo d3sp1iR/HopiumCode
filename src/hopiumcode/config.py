@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Config:
-    llm_model: str = "qwen3:8b"
+    llm_model: str = "qwen3:4b"  # проверена check_tools (docs/models.md); qwen3:8b через CG_LLM_MODEL
     embed_model: str = "nomic-embed-text"
     ollama_url: str = "http://localhost:11434"
     repo_root: Path = Path("data/repo/flask/src/flask")  # индексируется только src/flask (make fetch)
@@ -16,7 +16,8 @@ class Config:
     top_k: int = 8
     max_steps: int = 4
     graph_backend: str = "networkx"  # networkx | kuzu
-    repo_name: str = "целевой репозиторий"  # имя проекта для системного промпта
+    repo_name: str = "Flask"  # имя проекта для системного промпта
+    think: bool = False  # режим размышлений qwen3: точнее не стал, а ответ в 2-4 раза дольше
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -32,4 +33,5 @@ class Config:
             max_steps=int(e("CG_MAX_STEPS", cls.max_steps)),
             graph_backend=e("CG_GRAPH_BACKEND", cls.graph_backend),
             repo_name=e("CG_REPO_NAME", cls.repo_name),
+            think=e("CG_THINK", "0") == "1",
         )
