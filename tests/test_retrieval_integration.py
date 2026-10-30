@@ -1,10 +1,10 @@
 """Настоящие chunker + BM25 + граф + Retriever на мини-репозитории; векторная часть подставная."""
+from hopiumcode.config import Config
 from hopiumcode.graph.extract import extract
 from hopiumcode.graph.store import NetworkXStore
 from hopiumcode.indexing.chunker import chunk_file
 from hopiumcode.indexing.loader import iter_files
 from hopiumcode.indexing.vectorstore import VectorIndex
-from hopiumcode.config import Config
 from hopiumcode.retrieval.hybrid import Retriever
 from hopiumcode.retrieval.lexical import Lexical
 

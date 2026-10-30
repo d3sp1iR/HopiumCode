@@ -16,6 +16,6 @@ test-all: test
 eval:
 	$(PYTHON) -m eval.run_eval $(ARGS)
 lint:
-	$(PYTHON) -m ruff check src tests eval
+	$(PYTHON) -m ruff check src tests eval scripts
 check-calls:
 	$(PYTHON) scripts/check_calls.py sample

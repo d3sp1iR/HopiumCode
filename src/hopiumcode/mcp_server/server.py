@@ -499,7 +499,7 @@ def _errors_as_text(fn):
             return fn(*args, **kwargs)
         except ToolInputError as exc:
             return f"Ошибка: {exc}"
-        except Exception as exc:  # noqa: BLE001 — неожиданное: в лог и коротко модели
+        except Exception as exc:
             log.exception("инструмент %s упал", fn.__name__)
             return f"Ошибка: внутренняя ошибка инструмента {fn.__name__}: {type(exc).__name__}"
     return wrapper

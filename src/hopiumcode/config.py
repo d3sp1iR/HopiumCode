@@ -1,5 +1,6 @@
 """Конфигурация. Владелец: участник 1."""
 from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,7 @@ class Config:
     think: bool = False  # режим размышлений qwen3: точнее не стал, а ответ в 2-4 раза дольше
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         e = os.environ.get
         return cls(
             llm_model=e("CG_LLM_MODEL", cls.llm_model),

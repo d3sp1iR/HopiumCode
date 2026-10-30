@@ -1,6 +1,6 @@
 """BM25, токенизация и слияние RRF (участник 2)."""
 from hopiumcode.models import Chunk, Hit
-from hopiumcode.retrieval.lexical import Lexical, _BM25, fuse, split_identifier, tokenize
+from hopiumcode.retrieval.lexical import _BM25, Lexical, fuse, split_identifier, tokenize
 
 
 def chunk(cid: str, text: str, name: str | None = None, path: str = "a.py") -> Chunk:

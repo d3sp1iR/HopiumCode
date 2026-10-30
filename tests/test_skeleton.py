@@ -23,6 +23,7 @@ def test_importable(name):
 def test_no_unimplemented_stubs_left():
     """Заглушки участников заменены реализациями: «raise NotImplementedError("участник N")» не осталось."""
     import pathlib
+
     import hopiumcode
     root = pathlib.Path(hopiumcode.__file__).parent
     left = [p.relative_to(root).as_posix() for p in root.rglob("*.py")

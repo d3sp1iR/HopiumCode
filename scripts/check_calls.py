@@ -17,10 +17,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hopiumcode.config import Config  # noqa: E402
-from hopiumcode.graph.extract import call_sites, extract  # noqa: E402
+from hopiumcode.config import Config
+from hopiumcode.graph.extract import call_sites, extract
 
-MARK = re.compile(r"^- \[([ x-])\] ", re.M)
+MARK = re.compile(r"^- \[([ x-])\] ", re.MULTILINE)
 
 
 def sample(n: int, seed: int, out: Path) -> int:
@@ -36,7 +36,7 @@ def sample(n: int, seed: int, out: Path) -> int:
     rows = [f"# Проверка рёбер CALLS ({len(picked)} из {len(calls)}, seed={seed}, корень {root})", "",
             "Отметьте: `[x]` верно, `[-]` неверно. Верно = на указанной строке вызывается именно эту функцию.", ""]
     for e in picked:
-        src, dst = by_id[e.src], by_id[e.dst]
+        src, _dst = by_id[e.src], by_id[e.dst]
         line = lines_at.get((e.src, e.dst))
         code = ""
         if line:

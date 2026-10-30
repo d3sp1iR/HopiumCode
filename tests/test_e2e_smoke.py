@@ -13,7 +13,7 @@ from hopiumcode.orchestrator import (
     retrieve_with_fallback,
     verify_citations,
 )
-from hopiumcode.stubs import ScriptedChat, StubTools, stub_retrieve
+from hopiumcode.stubs import StubTools, stub_retrieve
 
 CFG = Config(max_steps=2, repo_name="Flask")
 QUESTIONS = {q["id"]: q for q in load_questions()}
@@ -120,7 +120,7 @@ def test_index_without_sources_hints_fetch(tmp_path, monkeypatch, capsys):
 
 
 def test_index_falls_back_to_stub_when_module_not_ready(tmp_path, monkeypatch, capsys):
-    import hopiumcode.indexing.build as build
+    from hopiumcode.indexing import build
 
     def not_ready(*args, **kwargs):
         raise NotImplementedError("участник 2")
@@ -134,7 +134,7 @@ def test_index_falls_back_to_stub_when_module_not_ready(tmp_path, monkeypatch, c
 
 
 def test_index_reports_ollama_down(tmp_path, monkeypatch, capsys):
-    import hopiumcode.indexing.build as build
+    from hopiumcode.indexing import build
 
     def down(*args, **kwargs):
         raise ConnectionError("refused")

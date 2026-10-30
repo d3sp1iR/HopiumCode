@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import logging
 import re
 from collections import defaultdict
@@ -17,9 +18,9 @@ log = logging.getLogger(__name__)
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _MD_HEADING = re.compile(r"#{1,6}\s")
 _RST_ADORN = re.compile(r"([=\-`:'\"~^_*+#<>])\1{2,}\s*")
-_FENCE = re.compile(r"```.*?```", re.S)
+_FENCE = re.compile(r"```.*?```", re.DOTALL)
 _SPAN = re.compile(r"`([^`\n]+)`")
-_DIRECTIVE = re.compile(r"^\s*\.\. auto\w+::\s*(\S+)", re.M)
+_DIRECTIVE = re.compile(r"^\s*\.\. auto\w+::\s*(\S+)", re.MULTILINE)
 _REF = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 
 Target = tuple[str, str]
@@ -84,7 +85,7 @@ def _split(lines: list[str], cuts: list[tuple[int, str]]) -> list[Section]:
         titles.setdefault(0, "")
     bounds.append(len(lines))
     out: list[Section] = []
-    for a, b in zip(bounds, bounds[1:]):
+    for a, b in itertools.pairwise(bounds):
         block = lines[a:b]
         if any(line.strip() for line in block):
             out.append((a + 1, b, titles[a], "\n".join(block)))

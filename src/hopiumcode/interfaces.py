@@ -1,7 +1,9 @@
 """Интерфейсы между зонами. Владелец: участник 1."""
 from __future__ import annotations
+
 from typing import Protocol
-from .models import Chunk, Hit, Node, Edge
+
+from .models import Chunk, Edge, Hit, Node
 
 
 class VectorIndexLike(Protocol):           # реализует участник 2

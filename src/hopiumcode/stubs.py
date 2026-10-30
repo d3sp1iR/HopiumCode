@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import Chunk, Hit
-from .orchestrator import ModelReply, ToolCall
+from .orchestrator import ModelReply
 
 _DEMO = [
     Chunk("app/db.py::Connection.connect", "app/db.py", 10, 24, "method", "Connection.connect",

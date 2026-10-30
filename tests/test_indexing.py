@@ -1,4 +1,5 @@
 """Загрузка и разбиение на фрагменты (участник 2)."""
+import itertools
 from pathlib import Path
 
 from hopiumcode.graph.extract import extract
@@ -133,7 +134,7 @@ def test_long_function_is_split_with_overlap(tmp_path):
     lines = path.read_text().splitlines()
     for c in chunks:
         assert c.text == "\n".join(lines[c.start_line - 1:c.end_line])      # номера строк честные
-    for a, b in zip(chunks, chunks[1:]):
+    for a, b in itertools.pairwise(chunks):
         assert b.start_line <= a.end_line + 1                                # нет дыр
         assert b.start_line > a.start_line                                   # есть движение вперёд
 

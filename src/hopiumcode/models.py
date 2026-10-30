@@ -1,5 +1,6 @@
 """Общие данные. Владелец: участник 1. Менять только по согласованию всех зон."""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Literal
 

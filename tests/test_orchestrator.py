@@ -122,7 +122,9 @@ def test_scripted_chat_end_to_end():
 
 def _ollama_chat_with(resp, monkeypatch):
     """OllamaChat без настоящего пакета ollama: подменяем клиента."""
-    import sys, types
+    import sys
+    import types
+
     from hopiumcode.orchestrator import OllamaChat
 
     class Client:
@@ -148,7 +150,7 @@ def test_ollama_adapter_parses_object_response(monkeypatch):
 
 
 # --- запасные вызовы инструментов и повтор без ссылок ---------------------------------
-from hopiumcode.orchestrator import is_refusal, rule_tool_call, text_tool_calls  # noqa: E402
+from hopiumcode.orchestrator import is_refusal, rule_tool_call, text_tool_calls
 
 KNOWN = {"search_code", "read_file", "find_callers", "git_log", "git_blame"}
 

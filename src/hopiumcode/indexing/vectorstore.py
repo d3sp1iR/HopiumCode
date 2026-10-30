@@ -1,12 +1,15 @@
 """Векторная БД (Chroma). Владелец: участник 2."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from ..config import Config
 from ..models import Chunk, Hit
 from .embed import OllamaEmbedder, chunk_embed_text
+
+log = logging.getLogger(__name__)
 
 COLLECTION = "chunks"
 ADD_BATCH = 128
@@ -51,8 +54,8 @@ class VectorIndex:
         """Удаляет коллекцию целиком (нужно при смене модели эмбеддингов: другая размерность)."""
         try:
             self._chroma().delete_collection(COLLECTION)
-        except Exception:  # noqa: BLE001 - коллекции могло не быть
-            pass
+        except Exception as exc:  # noqa: BLE001 - коллекции могло не быть
+            log.debug("коллекция %s не удалена: %s", COLLECTION, exc)
         self._collection = None
 
     def count(self) -> int:

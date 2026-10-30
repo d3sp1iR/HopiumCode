@@ -1,4 +1,4 @@
-from hopiumcode.prompts import SYSTEM_PROMPT, ENRICHED_TEMPLATE
+from hopiumcode.prompts import ENRICHED_TEMPLATE, SYSTEM_PROMPT
 
 
 def test_templates_have_placeholders():

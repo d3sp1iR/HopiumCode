@@ -28,7 +28,7 @@ import queue
 import subprocess
 import sys
 import threading
-from typing import Any
+from typing import Any, Self
 
 log = logging.getLogger("hopiumcode.mcp_client")
 
@@ -156,7 +156,7 @@ class McpClient:
         return (self._proc is not None and self._proc.poll() is None
                 and not self._stdout_eof.is_set())
 
-    def __enter__(self) -> "McpClient":
+    def __enter__(self) -> Self:
         self.start()
         return self
 
@@ -222,7 +222,7 @@ class McpClient:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"аргументы не являются JSON: {exc.msg}") from exc
         if not isinstance(args, dict):
-            raise ValueError("аргументы должны быть объектом {имя: значение}")
+            raise ValueError("аргументы должны быть объектом {имя: значение}")  # noqa: TRY004 - ловится как ошибка аргументов
 
         schema = self._schemas.get(name)
         if not schema:

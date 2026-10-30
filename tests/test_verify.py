@@ -1,4 +1,5 @@
 import pytest
+
 from hopiumcode.orchestrator import classify, parse_citations, verify_citations
 
 ALLOWED = [("app/db.py", 10, 24), ("docs/usage.md", 20, 30)]
