@@ -9,3 +9,6 @@ data/*
 !data/.gitkeep
 eval/results/*
 !eval/results/.gitkeep
+
+# метки Windows о скачанных файлах (ADS при распаковке zip)
+*:Zone.Identifier
