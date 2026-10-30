@@ -1,7 +1,11 @@
-"""Команда index: векторы (участник 2) и граф (участник 3). Владелец: участник 2."""
+"""Полный процесс индексации репозитория"""
 from __future__ import annotations
 
+from ..config import Config
+from ..graph.build import build_graph
 
-def build_all() -> None:
-    """Загрузка -> фрагменты -> эмбеддинги -> Chroma + BM25; затем граф. Инкрементально, по хэшам файлов."""
-    raise NotImplementedError("участники 2 и 3")
+
+def build_all(config: Config | None = None) -> None:
+    """Запускает полную сборку индексов и графа."""
+    cfg = config or Config.from_env()
+    build_graph(cfg)
