@@ -85,7 +85,7 @@ def test_python_chunks(tmp_path):
     path = write(tmp_path, "m.py", SAMPLE)
     chunks = by_id(chunk_file(path, tmp_path))
     assert set(chunks) == {"m.py::top", "m.py::A", "m.py::A.m", "m.py::A.n", "m.py::A.In",
-                           "m.py::A.In.q", "m.py::cond", "m.py"}
+                           "m.py::A.In.q", "m.py::cond", "m.py", "m.py~2", "m.py~3"}
     top = chunks["m.py::top"]
     assert (top.start_line, top.end_line, top.kind) == (7, 10, "function")
     assert top.text.startswith("@deco") and '"""doc"""' in top.text      # декоратор и докстринг
@@ -93,10 +93,15 @@ def test_python_chunks(tmp_path):
     assert chunks["m.py::A.n"].end_line == 24 and "def inner" in chunks["m.py::A.n"].text
     cls = chunks["m.py::A"]                  # заголовок класса без методов
     assert "attr = 1" in cls.text and "def m" not in cls.text and cls.kind == "class"
-    module = chunks["m.py"]
+    module = chunks["m.py"]                  # код модуля: по фрагменту на участок между определениями
     assert module.kind == "module" and module.name is None and "import os" in module.text
-    assert "def top" not in module.text and "Y = top(2)" in module.text
+    modules = [c for c in chunks.values() if c.kind == "module"]
+    assert all("def top" not in c.text for c in modules)
+    assert any("Y = top(2)" in c.text for c in modules)
     assert all(c.lang == "python" and c.path == "m.py" for c in chunks.values())
+    lines = SAMPLE.splitlines()              # диапазон строк не накрывает чужой код
+    for c in chunks.values():
+        assert "\n".join(lines[c.start_line - 1:c.end_line]) == c.text, c.id
 
 
 def test_python_edge_cases(tmp_path, caplog=None):

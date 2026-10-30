@@ -309,6 +309,23 @@ def retrieve_with_fallback(real: Callable[[str, int, str], list[Hit]],
     return retrieve
 
 
+class _NoTools:
+    """Инструменты недоступны (сервер не запустился): пустой список схем, вызов возвращает текст ошибки."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def start(self) -> None: ...
+
+    def list_tools_for_ollama(self) -> list[dict]:
+        return []
+
+    def call_tool(self, name: str, args: dict) -> str:
+        return f"Ошибка: инструменты недоступны ({self.reason})"
+
+    def close(self) -> None: ...
+
+
 class ToolsWithFallback:
     """Клиент инструментов (ToolClientLike) с откатом: пока настоящий не реализован, работает заглушка.
 
@@ -334,6 +351,11 @@ class ToolsWithFallback:
                 self._active = self._real
             except NotImplementedError as ex:
                 self._switch_to_stub(ex)
+            except Exception as ex:  # noqa: BLE001 - сервер не поднялся: отвечаем без инструментов, а не падаем
+                msg = f"⚠ MCP-сервер не запустился ({ex}); агент отвечает без инструментов"
+                print(msg, file=sys.stderr)
+                _event("tools_start_failed", error=repr(ex))
+                self._active = _NoTools(str(ex))
         return self._active
 
     def _call(self, method: str, *args):

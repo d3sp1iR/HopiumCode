@@ -39,13 +39,14 @@ def test_fake_pipeline_answers_with_verified_citations(qid):
 
 def test_eval_main_fake_writes_result(tmp_path, capsys):
     assert main(["--fake", "--only", "q01,q12", "--out-dir", str(tmp_path)]) == 0
-    files = list(tmp_path.glob("*_hybrid_fake.json"))
-    assert len(files) == 1
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1 and files[0].with_suffix(".md").exists()
     data = json.loads(files[0].read_text(encoding="utf-8"))
-    assert [r["id"] for r in data["questions"]] == ["q01", "q12"]
-    assert set(data["summary"]["by_type"]) == {"semantic", "trap"}
-    assert all(r["citations_verified"] == 1.0 for r in data["questions"])
-    assert "ВСЕГО" in capsys.readouterr().out
+    rows = data["questions"]["hybrid"]
+    assert [r["id"] for r in rows] == ["q01", "q12"]
+    assert set(data["summary"]["hybrid"]["by_type"]) == {"semantic", "trap"}
+    assert all(r["citations_verified"] == 1.0 for r in rows)
+    assert "Итог по режимам" in capsys.readouterr().out
 
 
 def test_eval_main_rejects_unknown_id(tmp_path):
@@ -94,6 +95,21 @@ def test_tools_fallback_on_partial_implementation():
     assert t.list_tools_for_ollama() == [] and real.started
     assert "(заглушка)" in t.call_tool("read_file", {"path": "app.py"})
     assert orchestrator.fallback_warnings()
+    t.close()
+
+
+def test_tools_server_start_failure_runs_without_tools(capsys):
+    class Broken(StubTools):
+        def start(self):
+            raise RuntimeError("MCP-сервер завершился")
+
+    t = ToolsWithFallback(Broken(), StubTools())
+    assert t.list_tools_for_ollama() == []                       # без инструментов, но не падаем
+    assert t.call_tool("read_file", {"path": "app.py"}).startswith("Ошибка: инструменты недоступны")
+    assert "MCP-сервер не запустился" in capsys.readouterr().err
+    ans = build_fake_agent(CFG)
+    ans.tools = t
+    assert ans.answer("Где создаётся сессия?").citations         # агент отвечает по контексту
     t.close()
 
 

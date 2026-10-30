@@ -62,9 +62,15 @@ ReadFileError = ToolInputError  # старое имя, на него ссыла�
 
 # --- Безопасное разрешение пути ---------------------------------------------
 def get_repo_root() -> Path:
+    """Корень репозитория: REPO_ROOT, иначе CG_REPO_ROOT, иначе Config.repo_root (тот же, что у индекса)."""
     raw = next((os.environ[v] for v in ROOT_ENV_VARS if os.environ.get(v)), None)
     if not raw:
-        raise ReadFileError("не задана переменная окружения REPO_ROOT")
+        from hopiumcode.config import Config
+        default = Path(Config.from_env().repo_root)
+        if not default.is_dir():
+            raise ReadFileError(f"не задана переменная окружения REPO_ROOT, а каталога по умолчанию {default} "
+                                "нет (выполните make fetch или задайте REPO_ROOT)")
+        return default.resolve()
     root = Path(raw).expanduser().resolve()
     if not root.is_dir():
         raise ReadFileError("REPO_ROOT не указывает на существующий каталог")

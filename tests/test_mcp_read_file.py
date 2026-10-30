@@ -154,10 +154,22 @@ def test_empty_file(repo):
     assert read_file_impl("empty.py") == "(пустой файл)"
 
 
-def test_repo_root_not_set(repo, monkeypatch):
+def test_repo_root_not_set_and_no_default(repo, monkeypatch, tmp_path):
     monkeypatch.delenv("REPO_ROOT")
+    monkeypatch.delenv("CG_REPO_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)                  # каталога по умолчанию из Config здесь нет
     with pytest.raises(ReadFileError, match="REPO_ROOT"):
         read_file_impl("pkg/app.py")
+
+
+def test_repo_root_defaults_to_config(repo, monkeypatch, tmp_path):
+    monkeypatch.delenv("REPO_ROOT")
+    monkeypatch.delenv("CG_REPO_ROOT", raising=False)
+    default = tmp_path / "data" / "repo" / "flask" / "src" / "flask"
+    default.mkdir(parents=True)
+    (default / "app.py").write_text("import os\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)                  # Config.repo_root относителен текущего каталога
+    assert read_file_impl("app.py", 1, 1) == " 1|import os"
 
 
 def test_cg_repo_root_fallback(repo, monkeypatch):

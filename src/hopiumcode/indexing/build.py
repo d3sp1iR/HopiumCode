@@ -17,6 +17,7 @@ from .loader import iter_files
 log = logging.getLogger(__name__)
 
 MANIFEST = "manifest.json"
+CHUNKER_VERSION = 2  # увеличить при изменении правил разбиения: индекс пересоберётся целиком
 
 
 def _sha256(path: Path) -> str:
@@ -55,7 +56,8 @@ def build_all(config: Config | None = None, index: Any | None = None, graph: boo
         index = VectorIndex(cfg)
 
     old = _load_manifest(manifest_path)
-    full = old.get("embed_model") != cfg.embed_model or old.get("root") != str(root.resolve())
+    meta = {"embed_model": cfg.embed_model, "root": str(root.resolve()), "chunker_version": CHUNKER_VERSION}
+    full = any(old.get(k) != v for k, v in meta.items())
     old_files: dict[str, str] = {} if full else old.get("files", {})
 
     current: dict[str, str] = {}
@@ -68,7 +70,7 @@ def build_all(config: Config | None = None, index: Any | None = None, graph: boo
     removed = [p for p in old_files if p not in current]
     changed = [p for p, h in current.items() if old_files.get(p) != h]
     if full and old:
-        log.info("модель эмбеддингов или каталог изменились: полная переиндексация")
+        log.info("модель эмбеддингов, каталог или правила разбиения изменились: полная переиндексация")
 
     if full:
         index.reset()                          # другая модель или каталог: старые векторы не годятся
@@ -76,17 +78,17 @@ def build_all(config: Config | None = None, index: Any | None = None, graph: boo
         for rel in removed + [p for p in changed if p in old_files]:
             index.delete_by_path(rel)
 
+    for rel in removed:
+        old_files.pop(rel, None)
+    _save_manifest(manifest_path, {**meta, "files": old_files})
     added = 0
     for rel in changed:
         chunks = chunk_file(files[rel], root)
         if chunks:
             index.add(chunks)
         added += len(chunks)
-        old_files[rel] = current[rel]          # manifest обновляется по файлам: сбой не теряет прогресс
-    for rel in removed:
-        old_files.pop(rel, None)
-    _save_manifest(manifest_path, {"embed_model": cfg.embed_model, "root": str(root.resolve()),
-                                   "files": old_files})
+        old_files[rel] = current[rel]
+        _save_manifest(manifest_path, {**meta, "files": old_files})  # по файлам: сбой не теряет прогресс
 
     stats: dict[str, Any] = {"files": len(current), "changed": len(changed), "removed": len(removed),
                              "chunks_added": added}

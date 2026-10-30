@@ -121,27 +121,35 @@ def _chunk_python(rel: str, text: str) -> list[Chunk]:
     visit(tree.body, "", False, True)
 
     # Код верхнего уровня: всё, что не вошло в определения (импорты, константы, докстринг модуля).
-    rest = [(n, line) for n, line in enumerate(lines, start=1) if n not in covered]
-    while rest and not rest[0][1].strip():
-        rest.pop(0)
-    while rest and not rest[-1][1].strip():
-        rest.pop()
-    collapsed: list[tuple[int, str]] = []   # подряд идущие пустые строки схлопываем
-    for n, line in rest:
-        if line.strip() or (collapsed and collapsed[-1][1].strip()):
-            collapsed.append((n, line))
-    out.extend(_module_chunks(rel, collapsed))
+    out.extend(_module_chunks(rel, lines, covered))
     return out
 
 
-def _module_chunks(rel: str, collapsed: list[tuple[int, str]]) -> list[Chunk]:
-    """Фрагменты кода верхнего уровня. Номера строк берутся из исходного файла: диапазон ссылки
-    охватывает первую и последнюю строку кода верхнего уровня (между ними могут лежать функции)."""
-    texts = [line for _, line in collapsed]
+def _module_chunks(rel: str, lines: list[str], covered: set[int]) -> list[Chunk]:
+    """Фрагменты кода верхнего уровня: по одному на каждый непрерывный участок между определениями.
+
+    Участок не перешагивает функции и классы, поэтому диапазон строк фрагмента не накрывает чужой код
+    (иначе проверка ссылок приняла бы ссылку на функцию, которую модель не видела). Первый фрагмент
+    получает id "path" (как узел File), остальные "path~2", "path~3", ...
+    """
+    runs: list[tuple[int, list[str]]] = []          # (первая строка, строки участка)
+    for n, line in enumerate(lines, start=1):
+        if n in covered:
+            continue
+        if runs and runs[-1][0] + len(runs[-1][1]) == n:
+            runs[-1][1].append(line)
+        else:
+            runs.append((n, [line]))
     chunks: list[Chunk] = []
-    for k, (a, b, part) in enumerate(split_lines(texts, 1), start=1):
-        chunks.append(Chunk(rel if k == 1 else f"{rel}~{k}", rel, collapsed[a - 1][0],
-                            collapsed[b - 1][0], "module", None, part, "python"))
+    for first, run in runs:
+        while run and not run[0].strip():           # пустые строки по краям участка не нужны
+            run.pop(0)
+            first += 1
+        while run and not run[-1].strip():
+            run.pop()
+        for start, end, part in split_lines(run, first):
+            k = len(chunks) + 1
+            chunks.append(Chunk(rel if k == 1 else f"{rel}~{k}", rel, start, end, "module", None, part, "python"))
     return chunks
 
 
