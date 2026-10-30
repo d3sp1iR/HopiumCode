@@ -1,5 +1,7 @@
 """Все модули импортируются; заглушки честно сообщают, чья они зона."""
 import importlib
+import re
+
 import pytest
 
 MODULES = [
@@ -18,10 +20,14 @@ def test_importable(name):
     importlib.import_module(name)
 
 
-def test_stub_names_owner():
-    from hopiumcode.retrieval.hybrid import retrieve
-    with pytest.raises(NotImplementedError, match="участник 3"):
-        retrieve("вопрос")
+def test_no_unimplemented_stubs_left():
+    """Заглушки участников заменены реализациями: «raise NotImplementedError("участник N")» не осталось."""
+    import pathlib
+    import hopiumcode
+    root = pathlib.Path(hopiumcode.__file__).parent
+    left = [p.relative_to(root).as_posix() for p in root.rglob("*.py")
+            if re.search(r'raise NotImplementedError\(\s*["\']участник', p.read_text(encoding="utf-8"))]
+    assert left == []
 
 
 def test_config_from_env(monkeypatch):

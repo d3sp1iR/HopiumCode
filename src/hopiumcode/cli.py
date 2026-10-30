@@ -26,6 +26,10 @@ def index(root: Path) -> int:
     from .orchestrator import warn_fallback
     try:
         build_all()
+    except ConnectionError as ex:
+        print(f"Ollama недоступна: {ex}\nЗапустите `ollama serve` и скачайте модель эмбеддингов "
+              f"(`ollama pull nomic-embed-text`).", file=sys.stderr)
+        return 2
     except NotImplementedError as ex:
         from .stubs import stub_build_all
         warn_fallback("indexing.build.build_all", ex, "stubs.stub_build_all")
@@ -45,6 +49,10 @@ def ask(question: str, mode: str, fake: bool) -> int:
               file=sys.stderr)
         return 2
     except Exception as ex:
+        from .indexing.vectorstore import IndexNotBuilt
+        if isinstance(ex, (IndexNotBuilt, FileNotFoundError)):
+            print(f"{ex}\nСначала выполните: make index", file=sys.stderr)
+            return 3
         if type(ex).__module__.split(".")[0] != "ollama":  # например, модель не скачана
             raise
         print(f"Ollama: {ex}\nСкачайте модель (`ollama pull {cfg.llm_model}`) или задайте CG_LLM_MODEL.",

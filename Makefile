@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 # доп. флаги для ask и eval, например ARGS="--fake --mode vector"
 ARGS ?=
 
-.PHONY: fetch index ask test eval lint
+.PHONY: fetch index ask test eval lint check-calls
 fetch:
 	bash scripts/fetch_repo.sh
 index:
@@ -15,3 +15,5 @@ eval:
 	$(PYTHON) -m eval.run_eval $(ARGS)
 lint:
 	$(PYTHON) -m ruff check src tests eval
+check-calls:
+	$(PYTHON) scripts/check_calls.py sample

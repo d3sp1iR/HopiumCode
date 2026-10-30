@@ -80,12 +80,25 @@ def test_step_limit_forces_final_answer_without_tools():
     assert a.steps == 5 and m.calls[-1][1] is None and a.citations == [REF]
 
 
+class NotReadyTools:
+    """Клиент инструментов, который ещё не реализован (как раньше был McpClient)."""
+
+    def start(self):
+        raise NotImplementedError("участник 4")
+
+    def list_tools_for_ollama(self):
+        raise NotImplementedError("участник 4")
+
+    def call_tool(self, name, args):
+        raise NotImplementedError("участник 4")
+
+    def close(self):
+        pass
+
+
 def test_tools_not_implemented_runs_without_tools():
-    class NotReady(StubTools):                    # клиент инструментов, который ещё не реализован
-        def list_tools_for_ollama(self):
-            raise NotImplementedError("участник 4")
     m = Seq(ModelReply(f"Ответ {REF}."))
-    a = agent(m, NotReady()).answer("q")
+    a = agent(m, NotReadyTools()).answer("q")
     assert a.citations == [REF] and m.calls[0][1] is None
 
 

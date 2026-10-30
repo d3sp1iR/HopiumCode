@@ -1,246 +1,418 @@
-"""MCP-сервер, транспорт stdio, инструменты только на чтение. Владелец: участник 4.
+"""MCP-сервер HopiumCode (зона участника 4).
 
-Инструменты: read_file, search_code, find_callers, git_log, git_blame.
-Безопасность: пути только внутри REPO_ROOT, лимит ответа 8000 символов, git без shell.
+Инструменты: search_code, read_file, find_callers, git_log, git_blame.
+Описания для модели лежат в descriptions.py.
 
-Запуск: python -m hopiumcode.mcp_server.server (корень: переменная REPO_ROOT, иначе Config.repo_root).
-SDK: пакет mcp 2.x, класс MCPServer (в mcp 1.x он назывался FastMCP).
-Каждый инструмент — обычная функция с явным root: её можно тестировать без MCP. Ошибки возвращаются
-текстом «Ошибка: ...», а не исключением, чтобы модель могла прочитать причину.
+Транспорт stdio. Запуск из корня проекта:
+
+    REPO_ROOT=data/repo/flask/src/flask .venv/bin/python -m hopiumcode.mcp_server.server
+
+Важно для stdio: stdout занят протоколом JSON-RPC, поэтому никаких print();
+диагностика идёт только через logging в stderr.
 """
-from __future__ import annotations
 
 import ast
+import functools
+import logging
 import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated
 
-from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
-SERVER_NAME = "hopiumcode"
-MAX_CHARS = 8000
-DEFAULT_LINES = 200
-MAX_LINES = 400
-GIT_TIMEOUT = 10
-MAX_K = 20
-MAX_DEPTH = 3
-MAX_CALLERS = 50
-MAX_LOG = 50
-READ_SUFFIXES = {".py"}  # решение команды: в индексе и ссылках только .py
+try:  # mcp >= 2.0: FastMCP переименован в MCPServer, API декораторов тот же
+    from mcp.server import MCPServer as FastMCP
+except ImportError:
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP
+    except ImportError:  # mcp 1.x
+        from mcp.server.fastmcp import FastMCP
 
-# Тексты для модели: описания инструментов и аргументов (правятся здесь, см. docs/mcp_tools.md)
-DESCRIPTIONS = {
-    "search_code": (
-        "Вызывай первым для вопросов «где и как это работает», «за что отвечает модуль», «из чего состоит»: "
-        "не отвечай по памяти и не пиши вызов текстом, а вызови, например "
-        'search_code(query="маршрутизация URL route add_url_rule"). '
-        "Не подходит для «кто вызывает» (find_callers) и «кто менял, в каком коммите» (git_log, git_blame). "
-        'Результат: строки "[путь:начало-конец] | вид | имя | начало кода".'
-    ),
-    "read_file": (
-        "Вызывай, когда путь к файлу уже известен из вопроса или другого инструмента и нужно увидеть код, "
-        'например read_file(path="app.py", start_line=900, end_line=960). '
-        "Не ищи им, где что находится: для этого search_code. "
-        'Результат: первая строка "[путь:начало-конец]", затем строки "  12| код".'
-    ),
-    "find_callers": (
-        "Вызывай для вопросов «кто вызывает X», «где используется X», «что сломается, если изменить X»: передай "
-        'имя функции из вопроса, например find_callers(symbol="make_response"). '
-        "Не подходит для поиска по смыслу (search_code) и для истории (git_log). "
-        'Результат: строки "[путь:начало-конец] | имя вызывающей функции".'
-    ),
-    "git_log": (
-        "Вызывай для вопросов «кто и когда менял файл», «последний коммит», «история изменений», например "
-        'git_log(path="ctx.py", n=5). '
-        "Для одной строки или функции («кто добавил метод») — git_blame. "
-        'Результат: строки "хэш | автор | дата | сообщение коммита".'
-    ),
-    "git_blame": (
-        "Вызывай для вопросов «кто и в каком коммите добавил или изменил функцию, строку», например "
-        'git_blame(path="sessions.py", line=215); если номер строки неизвестен, сначала найди его через search_code. '
-        "Для истории всего файла — git_log. "
-        'Результат: "[путь:строка-строка] коммит хэш | автор | дата | сообщение" и сама строка.'
-    ),
-}
-ARGS = {
-    "path": "Путь к файлу от корня кода (src/flask), например ctx.py или sansio/scaffold.py.",
-    "start_line": "Первая строка (с 1). По умолчанию 1.",
-    "end_line": f"Последняя строка включительно. По умолчанию start_line + {DEFAULT_LINES - 1}; "
-                f"за один вызов не больше {MAX_LINES} строк.",
-    "n": f"Сколько последних коммитов показать (1-{MAX_LOG}), по умолчанию 5.",
-    "line": "Номер строки файла (с 1).",
-    "query": "Что ищем: вопрос или ключевые слова, лучше с английскими именами из кода.",
-    "k": f"Сколько фрагментов вернуть (1-{MAX_K}), по умолчанию 5.",
-    "symbol": "Имя функции или метода, например make_response или Flask.make_response.",
-    "depth": f"Глубина: 1 — прямые вызывающие, 2 — и их вызывающие (до {MAX_DEPTH}).",
-}
+from hopiumcode.mcp_server.descriptions import ARG_DESCRIPTIONS, TOOL_DESCRIPTIONS
+
+# --- Лимиты -----------------------------------------------------------------
+MAX_CHARS = 8000            # максимальная длина ответа целиком, вместе с пометкой
+MAX_LINES = 400             # максимум строк за один вызов
+MAX_FILE_BYTES = 2_000_000  # файлы больше не читаем вовсе (защита памяти)
+BINARY_SNIFF_BYTES = 8192   # где ищем нулевой байт, чтобы распознать бинарник
+NOTE_RESERVE = 300          # запас символов под пометку «обрезано»
+GIT_TIMEOUT = 10            # секунд на один вызов git
+GIT_LOG_MAX = 50            # потолок для n в git_log
+SEARCH_K_MAX = 10           # потолок для k в search_code
+SNIPPET_LINES = 6           # сколько первых строк фрагмента показывает search_code
+CALLERS_DEPTH_MAX = 3       # потолок для depth в find_callers
+
+ROOT_ENV_VARS = ("REPO_ROOT", "CG_REPO_ROOT")  # CG_REPO_ROOT — как в .env.example
+
+log = logging.getLogger("hopiumcode.mcp_server")
 
 
 class ToolInputError(ValueError):
-    """Ошибка в аргументах инструмента; текст показывается модели."""
+    """Ошибка инструмента: FastMCP превратит её в результат с isError=true,
+    текст исключения клиент увидит как есть."""
 
 
-def get_root() -> Path:
-    """Корень репозитория: REPO_ROOT из окружения или Config.repo_root."""
-    env = os.environ.get("REPO_ROOT")
-    if env:
-        return Path(env).resolve()
-    from ..config import Config
-    return Path(Config.from_env().repo_root).resolve()
+ReadFileError = ToolInputError  # старое имя, на него ссылаются тесты read_file
 
 
-def resolve_path(root: Path, path: str) -> Path:
-    """Путь внутри root. Запрещены пустой, абсолютный путь, "..", "~" и симлинки, ведущие наружу."""
-    raw = (path or "").strip().replace("\\", "/")
+# --- Безопасное разрешение пути ---------------------------------------------
+def get_repo_root() -> Path:
+    raw = next((os.environ[v] for v in ROOT_ENV_VARS if os.environ.get(v)), None)
     if not raw:
-        raise ToolInputError("не указан путь")
-    rel = Path(raw)
-    if rel.is_absolute() or raw.startswith("~") or ".." in rel.parts:
-        raise ToolInputError(f"путь вне репозитория: {path} (нужен путь относительно корня, без '..')")
-    full = (root / rel).resolve()
-    if not full.is_relative_to(root):
-        raise ToolInputError(f"путь вне репозитория: {path}")
-    return full
+        raise ReadFileError("не задана переменная окружения REPO_ROOT")
+    root = Path(raw).expanduser().resolve()
+    if not root.is_dir():
+        raise ReadFileError("REPO_ROOT не указывает на существующий каталог")
+    return root
 
 
-def locate(root: Path, path: str) -> Path:
-    """resolve_path, а если файла нет — пробует отрезать префикс, совпадающий с хвостом корня.
+def resolve_in_repo(path: str, root: Path) -> Path:
+    """Проверка пути по ТЗ (раздел 10, п. 3): запрет «..» и абсолютных путей,
+    затем (root / path).resolve() и проверка, что результат лежит внутри root.
 
-    Модель часто передаёт путь от корня git (src/flask/ctx.py), хотя корень инструментов — src/flask.
+    resolve() раскрывает все символические ссылки, поэтому ссылка, ведущая
+    наружу, даёт путь вне root и отсекается той же проверкой. Всё это идёт
+    ДО проверки существования: снаружи нельзя узнать, есть ли там файл.
     """
-    full = resolve_path(root, path)
-    if full.exists():
-        return full
-    raw = path.strip().replace("\\", "/")
-    for i in range(1, len(root.parts)):
-        prefix = "/".join(root.parts[-i:]) + "/"
-        if raw.startswith(prefix):
-            candidate = resolve_path(root, raw[len(prefix):])
-            if candidate.exists():
-                return candidate
-    return full
-
-
-def _rel(root: Path, full: Path) -> str:
-    return full.relative_to(root).as_posix()
-
-
-def _error(text: str) -> str:
-    return f"Ошибка: {text}"
-
-
-def read_file(root: Path, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-    """Строки файла в формате "  12| текст"; первая строка ответа — ссылка [путь:начало-конец]."""
-    root = Path(root).resolve()
+    if not path or "\x00" in path:
+        raise ToolInputError("пустой или некорректный путь")
+    # PureWindowsPath ловит и "/etc", и "\\etc", и "C:\\x", и "C:x" на любой ОС
+    if Path(path).is_absolute() or PureWindowsPath(path).anchor:
+        raise ToolInputError("путь вне репозитория: абсолютные пути запрещены, "
+                             "укажите путь относительно корня репозитория")
+    if ".." in re.split(r"[\\/]", path):
+        raise ToolInputError("путь вне репозитория: «..» в пути запрещено")
     try:
-        full = locate(root, path)
-    except ToolInputError as ex:
-        return _error(str(ex))
-    if not full.exists():
-        return _error(f"файл не найден: {path}. Найдите путь через search_code.")
-    if full.is_dir():
-        return _error(f"{path} — каталог, а не файл")
-    if full.suffix not in READ_SUFFIXES:
-        return _error(f"читать можно только файлы {', '.join(sorted(READ_SUFFIXES))}: {path}")
-    try:
-        lines = full.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        return _error(f"файл не в UTF-8: {path}")
-    total = len(lines)
-    rel = _rel(root, full)
-    if total == 0:
-        return f"[{rel}] пустой файл"
-
-    start = max(1, start_line or 1)
-    if start > total:
-        return _error(f"в {rel} всего {total} строк, start_line={start} за концом файла")
-    end = end_line if end_line is not None else start + DEFAULT_LINES - 1
-    if end < start:
-        return _error(f"start_line ({start}) больше end_line ({end})")
-    notes = []
-    end = min(end, total)
-    if end - start + 1 > MAX_LINES:
-        end = start + MAX_LINES - 1
-        notes.append(f"за один вызов не больше {MAX_LINES} строк")
-
-    budget = MAX_CHARS - 300  # запас на заголовок и пометку
-    body: list[str] = []
-    used = 0
-    for n in range(start, end + 1):
-        line = f"{n:>4}| {lines[n - 1]}"
-        if body and used + len(line) + 1 > budget:
-            notes.append(f"обрезано по лимиту {MAX_CHARS} символов")
-            break
-        body.append(line[:budget])
-        used += len(line) + 1
-    shown_end = start + len(body) - 1
-    header = f"[{rel}:{start}-{shown_end}] из {total} строк"
-    footer = ""
-    if notes:
-        footer = f"\n… {'; '.join(notes)}. Продолжение: read_file(path={rel!r}, start_line={shown_end + 1})"
-    elif shown_end < total:
-        footer = f"\n… дальше строки {shown_end + 1}-{total}: read_file(path={rel!r}, start_line={shown_end + 1})"
-    return f"{header}\n" + "\n".join(body) + footer
+        candidate = (root / path).resolve()
+    except (OSError, RuntimeError) as exc:  # петля ссылок и т. п.
+        raise ToolInputError("не удалось разрешить путь") from exc
+    # is_relative_to сравнивает части пути, а не строки:
+    # /repo_evil не считается вложенным в /repo
+    if not candidate.is_relative_to(root):
+        raise ToolInputError("путь вне репозитория")
+    return candidate
 
 
-# --------------------------------------------------------------------------- git
-
-def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess:
-    """git без shell, cwd=root (git сам найдёт репозиторий выше), таймаут GIT_TIMEOUT."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
-    return subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=root, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=GIT_TIMEOUT, check=False, env=env)
-
-
-def _git_failure(ex_or_res, root: Path) -> str:
-    if isinstance(ex_or_res, subprocess.TimeoutExpired):
-        return _error(f"git не ответил за {GIT_TIMEOUT} c")
-    if isinstance(ex_or_res, FileNotFoundError):
-        return _error("git не установлен")
-    err = (ex_or_res.stderr or "").strip()
-    if "not a git repository" in err:
-        return _error(f"{root} не находится в git-репозитории")
-    return _error(f"git: {err.splitlines()[-1] if err else 'код ' + str(ex_or_res.returncode)}")
-
-
-def _git_target(root: Path, path: str) -> tuple[Path, str]:
-    full = locate(root, path)
-    if not full.is_file():
+def resolve_existing(path: str) -> tuple[Path, Path]:
+    """Общая проверка для всех инструментов: путь внутри REPO_ROOT и существует."""
+    root = get_repo_root()
+    target = resolve_in_repo(path, root)
+    if not target.exists():
         raise ToolInputError(f"файл не найден: {path}")
-    return full, _rel(root, full)
+    return root, target
 
 
-def git_log(root: Path, path: str, n: int = 5) -> str:
-    """Строки "хэш7 | автор | дата ISO | сообщение (первая строка)", новые сверху."""
-    root = Path(root).resolve()
+def _read_text(target: Path, shown: str) -> str:
+    if not target.exists():
+        raise ReadFileError(f"файл не найден: {shown}")
+    if not target.is_file():
+        raise ReadFileError(f"это не файл: {shown}")
+    if target.stat().st_size > MAX_FILE_BYTES:
+        raise ReadFileError(f"файл слишком большой (лимит {MAX_FILE_BYTES} байт): {shown}")
+
+    # Путь уже без ссылок; O_NOFOLLOW не даст подменить последний компонент
+    # на ссылку между проверкой и открытием, O_NONBLOCK — зависнуть на FIFO.
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     try:
-        _, rel = _git_target(root, path)
-    except ToolInputError as ex:
-        return _error(str(ex))
-    n = max(1, min(int(n or 5), MAX_LOG))
+        fd = os.open(target, flags)
+    except OSError as exc:
+        raise ReadFileError(f"не удалось открыть файл: {shown}") from exc
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ReadFileError(f"это не обычный файл: {shown}")
+        data = f.read(MAX_FILE_BYTES + 1)
+
+    if len(data) > MAX_FILE_BYTES:
+        raise ReadFileError(f"файл слишком большой (лимит {MAX_FILE_BYTES} байт): {shown}")
+    if b"\x00" in data[:BINARY_SNIFF_BYTES]:
+        raise ReadFileError(f"бинарный файл, чтение не поддерживается: {shown}")
+    return data.decode("utf-8", errors="replace").removeprefix("\ufeff")
+
+
+def _split_lines(text: str) -> list[str]:
+    # Как универсальные переводы строк в open(): \n, \r\n, \r.
+    # Не splitlines(): он режет ещё и по \f, \v и т. п. и сбивает нумерацию.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+# --- Основная логика (тестируется без MCP) ----------------------------------
+def read_file_impl(path: str, start_line: int | None = None,
+                   end_line: int | None = None) -> str:
+    _, target = resolve_existing(path)
+    lines = _split_lines(_read_text(target, path))
+    total = len(lines)
+    if total == 0:
+        return "(пустой файл)"
+
+    start = 1 if start_line is None else start_line
+    if start < 1:
+        raise ReadFileError("start_line должен быть >= 1")
+    if start > total:
+        raise ReadFileError(f"start_line={start} больше числа строк в файле ({total})")
+    if end_line is not None and end_line < start:
+        raise ReadFileError("end_line меньше start_line")
+
+    end = total if end_line is None else min(end_line, total)
+    cut_by_lines = end - start + 1 > MAX_LINES
+    if cut_by_lines:
+        end = start + MAX_LINES - 1
+
+    width = len(str(end))
+    budget = MAX_CHARS - NOTE_RESERVE
+    rows: list[str] = []
+    used = 0
+    shown_end = start - 1
+    cut_by_chars = False
+    line_cut_mid = False
+
+    for n in range(start, end + 1):
+        row = f" {n:>{width}}|{lines[n - 1]}"
+        cost = len(row) + (1 if rows else 0)  # +1 за "\n" между строками
+        if used + cost > budget:
+            cut_by_chars = True
+            if not rows:  # одна строка длиннее лимита: отдаём её начало
+                rows.append(row[:budget])
+                shown_end = n
+                line_cut_mid = True
+            break
+        rows.append(row)
+        used += cost
+        shown_end = n
+
+    result = "\n".join(rows)
+    if cut_by_lines or cut_by_chars:
+        reason = (f"лимит {MAX_CHARS} символов" if cut_by_chars
+                  else f"лимит {MAX_LINES} строк")
+        note = f"\n… [обрезано: {reason}; показаны строки {start}-{shown_end} из {total}"
+        if line_cut_mid:
+            note += f"; строка {shown_end} показана не полностью"
+        if shown_end < total:
+            note += f"; продолжение: start_line={shown_end + 1}"
+        result += note + "]"
+    return result[:MAX_CHARS]  # страховка: жёсткий потолок
+
+
+
+# --- общий лимит ответа ----------------------------------------------------------
+def cap_text(text: str, limit: int | None = None) -> str:
+    """Обрезка по целым строкам до лимита ответа (8000 символов) с пометкой."""
+    limit = MAX_CHARS if limit is None else limit
+    if len(text) <= limit:
+        return text
+    mark = "\n… [обрезано: лимит ответа]"
+    cut = text[: limit - len(mark)]
+    if "\n" in cut:
+        cut = cut.rsplit("\n", 1)[0]
+    return cut + mark
+
+
+# --- search_code: обёртка над retrieve() участника 3 ------------------------------
+def _retrieve(query: str, k: int) -> list:
+    """retrieve(question, k, mode) -> list[Hit] из общего контракта (ТЗ, раздел 5).
+
+    Импорт ленивый: сервер должен стартовать и отдавать read_file и git,
+    даже пока индекс и граф не готовы.
+    """
+    from hopiumcode.retrieval.hybrid import retrieve
+    return retrieve(query, k=k, mode="hybrid")
+
+
+def search_code_impl(query: str, k: int = 5) -> str:
+    query = (query or "").strip()
+    if not query:
+        raise ToolInputError("пустой запрос")
+    if k < 1:
+        raise ToolInputError("k должен быть >= 1")
+    k = min(k, SEARCH_K_MAX)
     try:
-        res = _git(root, ["log", f"-n{n}", "--format=%H%x1f%an%x1f%aI%x1f%s", "--", rel])
-    except (subprocess.TimeoutExpired, FileNotFoundError) as ex:
-        return _git_failure(ex, root)
-    if res.returncode != 0:
-        return _git_failure(res, root)
+        hits = _retrieve(query, k)
+    except (ImportError, NotImplementedError) as exc:
+        raise ToolInputError("поиск ещё не готов: нет retrieval.hybrid.retrieve "
+                             "(участник 3) или индекса (участник 2)") from exc
+
+    blocks = []
+    for hit in hits[:k]:
+        c = hit.chunk
+        title = c.name or c.kind
+        head = f"[{c.path}:{c.start_line}-{c.end_line}] {title} ({hit.via}, {hit.score:.2f})"
+        text_lines = c.text.splitlines()
+        width = len(str(c.start_line + SNIPPET_LINES))
+        body = [f" {c.start_line + i:>{width}}|{line}"
+                for i, line in enumerate(text_lines[:SNIPPET_LINES])]
+        if len(text_lines) > SNIPPET_LINES:
+            body.append(f" … ещё {len(text_lines) - SNIPPET_LINES} строк: "
+                        f"read_file(path=\"{c.path}\", start_line={c.start_line}, "
+                        f"end_line={c.end_line})")
+        blocks.append("\n".join([head, *body]))
+    if not blocks:
+        return f"ничего не найдено по запросу: {query}"
+    return cap_text("\n\n".join(blocks))
+
+
+# --- find_callers: обёртка над графом участника 3 ---------------------------------
+@functools.lru_cache(maxsize=1)
+def _get_graph():
+    """Загруженный GraphStore (контракт: callers(symbol, depth) -> list[str] id).
+
+    СОГЛАСОВАТЬ с участником 3: нужна фабрика в graph/store.py, которая
+    загружает сохранённый граф из data/graph. Имя load_store — предложение.
+    """
+    from hopiumcode.graph.store import load_store
+    return load_store()
+
+
+def _symbol_lines(root: Path, rel_path: str, qualname: str) -> tuple[int, int] | None:
+    """Строки определения Class.method в файле — по ast, т.к. callers() отдаёт только id."""
+    try:
+        target = resolve_in_repo(rel_path, root)
+        tree = ast.parse(target.read_text(encoding="utf-8", errors="replace"))
+    except (ToolInputError, OSError, SyntaxError, ValueError):
+        return None
+    nodes: list[ast.AST] = [tree]
+    for part in qualname.split("."):
+        found = None
+        for parent in nodes:
+            for node in ast.iter_child_nodes(parent):
+                if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                        and node.name == part):
+                    found = node
+                    break
+            if found:
+                break
+        if found is None:
+            return None
+        nodes = [found]
+    node = nodes[0]
+    start = min([node.lineno, *(d.lineno for d in getattr(node, "decorator_list", []))])
+    return start, getattr(node, "end_lineno", node.lineno)
+
+
+def _format_symbol_id(root: Path, symbol_id: str) -> str:
+    """'path::Class.method' -> '[path:начало-конец] Class.method'."""
+    path, sep, qualname = symbol_id.partition("::")
+    if not sep:
+        return symbol_id
+    lines = _symbol_lines(root, path, qualname) if not qualname.startswith("#") else None
+    where = f"{path}:{lines[0]}-{lines[1]}" if lines else path
+    return f"[{where}] {qualname}"
+
+
+def find_callers_impl(symbol: str, depth: int = 1) -> str:
+    symbol = (symbol or "").strip().removesuffix("()")
+    if not symbol:
+        raise ToolInputError("пустое имя символа")
+    if depth < 1:
+        raise ToolInputError("depth должен быть >= 1")
+    depth = min(depth, CALLERS_DEPTH_MAX)
+    root = get_repo_root()
+    try:
+        graph = _get_graph()
+    except (ImportError, NotImplementedError, FileNotFoundError) as exc:
+        raise ToolInputError("граф кода ещё не готов (graph/, участник 3)") from exc
+    try:
+        ids = graph.callers(symbol, depth=depth)
+    except NotImplementedError as exc:
+        raise ToolInputError("граф кода ещё не готов (graph/, участник 3)") from exc
+    if not ids:
+        return f"вызовов не найдено: {symbol}"
+    return cap_text("\n".join(_format_symbol_id(root, i) for i in dict.fromkeys(ids)))
+
+
+# --- git ---------------------------------------------------------------------
+# Сообщения git разбираем по-английски, поэтому LC_ALL=C.
+_GIT_ENV = {"LC_ALL": "C", "LANGUAGE": "C", "GIT_TERMINAL_PROMPT": "0"}
+_ZERO_SHA = "0" * 40
+
+
+def _git_error_text(stderr: str, shown: str) -> str:
+    if "not a git repository" in stderr:
+        return "REPO_ROOT не является git-репозиторием"
+    if "dubious ownership" in stderr:
+        return ("git отказался работать с репозиторием чужого владельца; "
+                "выполните: git config --global --add safe.directory <путь>")
+    if "does not have any commits yet" in stderr or "no such ref: HEAD" in stderr:
+        return "в репозитории ещё нет коммитов"
+    if m := re.search(r"has only (\d+) lines?", stderr):
+        return f"строка вне диапазона: число строк в файле {shown} — {m.group(1)}"
+    if "no such path" in stderr:
+        return f"файл не отслеживается git: {shown}"
+    first = stderr.strip().splitlines()[0] if stderr.strip() else "неизвестная ошибка"
+    return f"ошибка git: {first.removeprefix('fatal: ')}"
+
+
+def run_git(args: list[str], root: Path, shown: str) -> str:
+    """git со списком аргументов, без shell, cwd=REPO_ROOT, с таймаутом."""
+    cmd = ["git", "--no-pager", "-c", "core.fsmonitor=false", *args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=root,
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            env={**os.environ, **_GIT_ENV},
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise ToolInputError("git не установлен или не найден в PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ToolInputError(f"git не ответил за {GIT_TIMEOUT} секунд") from exc
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        log.info("git %s -> %s: %s", args[0], proc.returncode, stderr.strip())
+        raise ToolInputError(_git_error_text(stderr, shown))
+    return stdout
+
+
+def _git_relpath(root: Path, target: Path) -> str:
+    # git получает путь относительно cwd=REPO_ROOT; после "--" он не станет опцией
+    return target.relative_to(root).as_posix() or "."
+
+
+def git_log_impl(path: str, n: int = 5) -> str:
+    if n < 1:
+        raise ToolInputError("n должен быть >= 1")
+    n = min(n, GIT_LOG_MAX)
+    root, target = resolve_existing(path)
+    # %B (сырое сообщение) + -z: коммиты разделены NUL, поля — \x1f.
+    # Не %s: git склеивает в «subject» весь первый абзац, а нужна первая строка.
+    args = ["log", f"-n{n}", "-z", "--no-color", "--format=%H%x1f%an%x1f%aI%x1f%B"]
+    if target.is_file():
+        args.append("--follow")  # история сквозь переименования
+    out = run_git([*args, "--", _git_relpath(root, target)], root, path)
+
     rows = []
-    for line in res.stdout.splitlines():
-        sha, author, date, subject = (line.split("\x1f") + ["", "", ""])[:4]
+    for rec in filter(None, out.split("\0")):
+        sha, author, date, message = (rec.lstrip("\n").split("\x1f", 3) + ["", "", ""])[:4]
+        subject = message.strip().split("\n", 1)[0].strip()
         rows.append(f"{sha[:7]} | {author} | {date} | {subject}")
     if not rows:
-        return f"Коммитов, менявших {rel}, нет (файл не в истории git)."
-    return f"git log {rel}, последние {len(rows)}:\n" + "\n".join(rows)
+        return f"нет коммитов для {path} (файл не отслеживается git?)"
+    return cap_text("\n".join(rows))
 
 
-def _parse_porcelain(text: str) -> dict:
-    lines = text.splitlines()
-    info = {"sha": lines[0].split()[0]}
+def _parse_porcelain(out: str) -> dict[str, str]:
+    """Разбор `git blame --porcelain` для одной строки.
+
+    Формат: заголовок "<sha40> <orig> <final> <count>", затем строки
+    "ключ значение" (author, author-time, author-tz, summary, filename, ...),
+    затем содержимое строки с префиксом табуляции.
+    """
+    lines = out.splitlines()
+    if not lines:
+        raise ToolInputError("git blame вернул пустой ответ")
+    header = lines[0].split()
+    info: dict[str, str] = {"sha": header[0], "orig_line": header[1], "final_line": header[2]}
     for line in lines[1:]:
         if line.startswith("\t"):
             info["content"] = line[1:]
@@ -250,245 +422,133 @@ def _parse_porcelain(text: str) -> dict:
     return info
 
 
-def _iso(epoch: str, tz: str) -> str:
+def _iso_from_git(ts: str, tz: str) -> str:
     sign = -1 if tz.startswith("-") else 1
     offset = timedelta(hours=int(tz[1:3]), minutes=int(tz[3:5])) * sign
-    return datetime.fromtimestamp(int(epoch), timezone(offset)).isoformat()
+    return datetime.fromtimestamp(int(ts), timezone(offset)).isoformat()
 
 
-def git_blame(root: Path, path: str, line: int) -> str:
-    """Коммит, автор, дата и сообщение для строки (git blame -L line,line --porcelain)."""
-    root = Path(root).resolve()
-    try:
-        full, rel = _git_target(root, path)
-    except ToolInputError as ex:
-        return _error(str(ex))
-    try:
-        total = len(full.read_text(encoding="utf-8", errors="replace").splitlines())
-    except OSError as ex:
-        return _error(f"не удалось прочитать {rel}: {ex}")
-    if not isinstance(line, int) or line < 1 or line > total:
-        return _error(f"в {rel} {total} строк, строка {line} вне диапазона")
-    try:
-        res = _git(root, ["blame", "-L", f"{line},{line}", "--porcelain", "--", rel])
-    except (subprocess.TimeoutExpired, FileNotFoundError) as ex:
-        return _git_failure(ex, root)
-    if res.returncode != 0:
-        return _git_failure(res, root)
-    info = _parse_porcelain(res.stdout)
-    ref = f"[{rel}:{line}-{line}]"
-    content = info.get("content", "")
-    if set(info["sha"]) == {"0"}:
-        return f"{ref} строка ещё не закоммичена\n{line:>4}| {content}"
-    date = _iso(info["author-time"], info.get("author-tz", "+0000")) if "author-time" in info else "?"
-    return (f"{ref} коммит {info['sha'][:7]} | {info.get('author', '?')} | {date} | {info.get('summary', '')}\n"
-            f"{line:>4}| {content}")
+def git_blame_impl(path: str, line: int) -> str:
+    if line < 1:
+        raise ToolInputError("line должен быть >= 1")
+    root, target = resolve_existing(path)
+    if not target.is_file():
+        raise ToolInputError(f"это не файл: {path}")
+    out = run_git(
+        ["blame", "-L", f"{line},{line}", "--porcelain", "--", _git_relpath(root, target)],
+        root, path,
+    )
+    b = _parse_porcelain(out)
+    code = f" {line}|{b.get('content', '')}"
+    if b["sha"] == _ZERO_SHA:
+        return f"{path}:{line} | строка ещё не закоммичена\n{code}"
+    date = _iso_from_git(b.get("author-time", "0"), b.get("author-tz", "+0000"))
+    head = " | ".join(
+        [f"{path}:{line}", b["sha"][:7], b.get("author", "?"), date, b.get("summary", "")]
+    )
+    # filename в porcelain отсчитывается от корня git-репозитория, а REPO_ROOT
+    # может быть его подкаталогом (data/repo/flask/src/flask): сравниваем хвост
+    rel = _git_relpath(root, target)
+    orig_file = b.get("filename", rel)
+    if orig_file != rel and not orig_file.endswith("/" + rel):
+        head += f" | исходно: {orig_file}:{b['orig_line']}"  # файл переименовывали
+    return f"{head}\n{code}"
 
 
-# --------------------------------------------------------------------------- поиск и граф (участники 2 и 3)
-
-def _warn(text: str) -> str:
-    print(f"⚠ {text}", file=sys.stderr)
-    return f"⚠ {text}"
+# --- MCP ---------------------------------------------------------------------
+mcp = FastMCP("hopiumcode")
 
 
-def _short(text: str, limit: int = 120) -> str:
-    one = " ".join(text.split())
-    return one if len(one) <= limit else one[:limit - 1] + "…"
+def _arg(tool: str, name: str):
+    """Описание аргумента для JSON Schema (попадает в inputSchema.properties)."""
+    return Field(description=ARG_DESCRIPTIONS[tool][name])
 
 
-def _fit(lines: list[str]) -> str:
-    out, used = [], 0
-    for line in lines:
-        if used + len(line) + 1 > MAX_CHARS - 60:
-            out.append(f"… обрезано по лимиту {MAX_CHARS} символов")
-            break
-        out.append(line)
-        used += len(line) + 1
-    return "\n".join(out)
+def _errors_as_text(fn):
+    """Ошибки инструмента возвращаются обычным текстом «Ошибка: …» (ТЗ: «понятным текстом»).
+
+    Не через исключение: SDK может скрыть текст исключения от клиента
+    и прислать только «Error executing tool …», и модель не поймёт, что не так.
+    functools.wraps сохраняет сигнатуру — по ней SDK строит схему аргументов.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ToolInputError as exc:
+            return f"Ошибка: {exc}"
+        except Exception as exc:  # noqa: BLE001 — неожиданное: в лог и коротко модели
+            log.exception("инструмент %s упал", fn.__name__)
+            return f"Ошибка: внутренняя ошибка инструмента {fn.__name__}: {type(exc).__name__}"
+    return wrapper
 
 
-def search_code(root: Path, query: str, k: int = 5) -> str:
-    """Фрагменты через retrieval.hybrid.retrieve: "[путь:начало-конец] | kind | имя | первые 120 символов"."""
-    if not (query or "").strip():
-        return _error("пустой запрос")
-    k = max(1, min(int(k or 5), MAX_K))
-    from ..retrieval.hybrid import retrieve
-    header = f"search_code {query!r}, найдено фрагментов: {{n}}"
-    try:
-        hits = retrieve(query, k, "hybrid")
-        stub = False
-    except NotImplementedError as ex:
-        from ..stubs import stub_retrieve
-        hits = stub_retrieve(query, k, "hybrid")
-        stub = True
-        header = _warn(f"ЗАГЛУШКА: retrieval.hybrid.retrieve не реализован ({ex}); ниже демо-фрагменты не из "
-                       "репозитория, ссылаться на них нельзя") + "\n" + header
-    if not hits:
-        return header.format(n=0) + "\nНичего не найдено. Уточните запрос именами из кода."
-    rows = []
-    for h in hits[:k]:
-        c = h.chunk
-        ref = f"{c.path}:{c.start_line}-{c.end_line}"
-        ref = ref if stub else f"[{ref}]"  # демо-ссылки без скобок: оркестратор не примет их как источник
-        rows.append(f"{ref} | {c.kind} | {c.name or 'module'} | {_short(c.text)}")
-    return _fit([header.format(n=len(rows)), *rows])
+def _describe(fn):
+    """Описание инструмента берётся из docstring — так работает и в mcp 1.x, и в 2.x."""
+    fn.__doc__ = TOOL_DESCRIPTIONS[fn.__name__]
+    return fn
 
 
-def _defs(tree: ast.AST) -> list[tuple[int, int, str]]:
-    """(начало с декораторами, конец, qualified name) всех функций и методов файла."""
-    out = []
-
-    def walk(node, prefix):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                walk(child, f"{prefix}{child.name}.")
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                start = min([child.lineno] + [d.lineno for d in child.decorator_list])
-                out.append((start, child.end_lineno, f"{prefix}{child.name}"))
-                walk(child, f"{prefix}{child.name}.")
-            else:
-                walk(child, prefix)
-    walk(tree, "")
-    return out
+@mcp.tool()
+@_describe
+@_errors_as_text
+def search_code(
+    query: Annotated[str, _arg("search_code", "query")],
+    k: Annotated[int, _arg("search_code", "k")] = 5,
+) -> str:
+    return search_code_impl(query, k)
 
 
-def _py_files(root: Path):
-    for p in sorted(root.rglob("*.py")):
-        rel = p.relative_to(root)
-        if "__pycache__" in rel.parts or any(part.startswith(".") for part in rel.parts):
-            continue
-        if p.resolve().is_relative_to(root):
-            yield p
+@mcp.tool()
+@_describe
+@_errors_as_text
+def read_file(
+    path: Annotated[str, _arg("read_file", "path")],
+    start_line: Annotated[int | None, _arg("read_file", "start_line")] = None,
+    end_line: Annotated[int | None, _arg("read_file", "end_line")] = None,
+) -> str:
+    return read_file_impl(path, start_line, end_line)
 
 
-def _parse(path: Path):
-    try:
-        return ast.parse(path.read_text(encoding="utf-8"))
-    except (SyntaxError, UnicodeDecodeError, OSError):
-        return None
+@mcp.tool()
+@_describe
+@_errors_as_text
+def find_callers(
+    symbol: Annotated[str, _arg("find_callers", "symbol")],
+    depth: Annotated[int, _arg("find_callers", "depth")] = 1,
+) -> str:
+    return find_callers_impl(symbol, depth)
 
 
-def _locate(root: Path, rel: str, qualname: str) -> tuple[int, int] | None:
-    try:
-        full = resolve_path(root, rel)
-    except ToolInputError:
-        return None
-    tree = _parse(full) if full.is_file() else None
-    for start, end, name in _defs(tree) if tree else []:
-        if name == qualname:
-            return start, end
-    return None
+@mcp.tool()
+@_describe
+@_errors_as_text
+def git_log(
+    path: Annotated[str, _arg("git_log", "path")],
+    n: Annotated[int, _arg("git_log", "n")] = 5,
+) -> str:
+    return git_log_impl(path, n)
 
 
-def _text_callers(root: Path, name: str) -> list[tuple[str, int, int, str]]:
-    """Функции, в теле которых встречается вызов name( — эвристика вместо графа."""
-    call = re.compile(rf"(?<![\w]){re.escape(name)}\s*\(")
-    own_def = re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(name)}\b")
-    found: dict[tuple[str, str], tuple[int, int]] = {}
-    for path in _py_files(root):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if name not in text:
-            continue
-        tree = _parse(path)
-        defs = _defs(tree) if tree else []
-        rel = _rel(root, path)
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#") or own_def.match(line) or not call.search(line):
-                continue
-            inner = [d for d in defs if d[0] <= n <= d[1]]
-            if inner:
-                start, end, qual = max(inner, key=lambda d: d[0])  # самая вложенная функция
-            else:
-                start, end, qual = n, n, "<код модуля>"
-            found.setdefault((rel, qual), (start, end))
-    return [(rel, s, e, q) for (rel, q), (s, e) in sorted(found.items(), key=lambda x: (x[0][0], x[1][0]))]
-
-
-def _graph_callers(root: Path, symbol: str, depth: int) -> list[str]:
-    from ..graph.query import callers
-    return list(callers(symbol, depth))
-
-
-def find_callers(root: Path, symbol: str, depth: int = 1) -> str:
-    """Вызывающие функции: "[путь:начало-конец] | имя вызывающей функции"."""
-    root = Path(root).resolve()
-    symbol = (symbol or "").strip()
-    if not re.fullmatch(r"[A-Za-z_][\w.]*", symbol):
-        return _error(f"нужно имя функции или метода, например make_response, а не {symbol!r}")
-    depth = max(1, min(int(depth or 1), MAX_DEPTH))
-    try:
-        ids = _graph_callers(root, symbol, depth)
-    except NotImplementedError as ex:
-        return _find_callers_by_text(root, symbol, depth, ex)
-    rows = []
-    for node_id in ids[:MAX_CALLERS]:
-        rel, sep, qual = node_id.partition("::")
-        span = _locate(root, rel, qual) if sep else None
-        rows.append(f"[{rel}:{span[0]}-{span[1]}] | {qual}" if span else f"{node_id} | (строки не найдены)")
-    if not rows:
-        return f"Граф: вызывающих {symbol} не найдено."
-    return _fit([f"find_callers {symbol} (граф кода, глубина {depth}), найдено: {len(rows)}", *rows])
-
-
-def _find_callers_by_text(root: Path, symbol: str, depth: int, ex: Exception) -> str:
-    warn = _warn(f"граф кода не реализован ({ex}): вызывающие найдены текстовым поиском '{symbol.split('.')[-1]}(' "
-                 "по .py-файлам, возможны ложные совпадения и пропуски")
-    rows, seen = [], set()
-    frontier = [symbol.split(".")[-1]]
-    for level in range(1, depth + 1):
-        nxt = []
-        for name in frontier:
-            for rel, start, end, qual in _text_callers(root, name):
-                if (rel, qual) in seen:
-                    continue
-                seen.add((rel, qual))
-                suffix = f" (уровень {level}, вызывает {name})" if depth > 1 else ""
-                rows.append(f"[{rel}:{start}-{end}] | {qual}{suffix}")
-                if qual != "<код модуля>":
-                    nxt.append(qual.split(".")[-1])
-        frontier = nxt
-    if not rows:
-        return f"{warn}\nВызовов {symbol} не найдено."
-    return _fit([warn, f"find_callers {symbol}, найдено: {len(rows)}", *rows[:MAX_CALLERS]])
-
-
-def create_server(root: Path | None = None) -> MCPServer:
-    root = Path(root or get_root()).resolve()
-    server = MCPServer(SERVER_NAME, instructions=f"Инструменты чтения кода репозитория (корень {root.name}).",
-                       log_level="WARNING")
-
-    @server.tool(name="read_file", description=DESCRIPTIONS["read_file"])
-    def _read_file(path: Annotated[str, Field(description=ARGS["path"])],
-                   start_line: Annotated[int | None, Field(description=ARGS["start_line"])] = None,
-                   end_line: Annotated[int | None, Field(description=ARGS["end_line"])] = None) -> str:
-        return read_file(root, path, start_line, end_line)
-
-    @server.tool(name="git_log", description=DESCRIPTIONS["git_log"])
-    def _git_log(path: Annotated[str, Field(description=ARGS["path"])],
-                 n: Annotated[int, Field(description=ARGS["n"])] = 5) -> str:
-        return git_log(root, path, n)
-
-    @server.tool(name="git_blame", description=DESCRIPTIONS["git_blame"])
-    def _git_blame(path: Annotated[str, Field(description=ARGS["path"])],
-                   line: Annotated[int, Field(description=ARGS["line"])]) -> str:
-        return git_blame(root, path, line)
-
-    @server.tool(name="search_code", description=DESCRIPTIONS["search_code"])
-    def _search_code(query: Annotated[str, Field(description=ARGS["query"])],
-                     k: Annotated[int, Field(description=ARGS["k"])] = 5) -> str:
-        return search_code(root, query, k)
-
-    @server.tool(name="find_callers", description=DESCRIPTIONS["find_callers"])
-    def _find_callers(symbol: Annotated[str, Field(description=ARGS["symbol"])],
-                      depth: Annotated[int, Field(description=ARGS["depth"])] = 1) -> str:
-        return find_callers(root, symbol, depth)
-
-    return server
+@mcp.tool()
+@_describe
+@_errors_as_text
+def git_blame(
+    path: Annotated[str, _arg("git_blame", "path")],
+    line: Annotated[int, _arg("git_blame", "line")],
+) -> str:
+    return git_blame_impl(path, line)
 
 
 def main() -> None:
-    create_server().run("stdio")
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+    try:
+        log.info("REPO_ROOT = %s", get_repo_root())
+    except ReadFileError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

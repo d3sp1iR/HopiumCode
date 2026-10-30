@@ -52,20 +52,11 @@ def test_eval_main_rejects_unknown_id(tmp_path):
     assert main(["--fake", "--only", "q99", "--out-dir", str(tmp_path)]) == 1
 
 
-def test_default_agent_falls_back_to_stubs(capsys, tmp_path, monkeypatch):
+def test_default_agent_wiring():
     pytest.importorskip("ollama")
-    monkeypatch.setenv("REPO_ROOT", str(tmp_path))      # MCP-сервер (зона 4) работает по временному корню
     agent = orchestrator.build_default_agent(CFG)
-    agent.model = ScriptedChat()  # без Ollama: проверяем подключение ретривера и инструментов
-    try:
-        ans = agent.answer("Где создаётся сессия?")
-    finally:
-        agent.tools.close()
-    assert ans.citations
-    warnings = orchestrator.fallback_warnings()
-    assert any("retrieval.hybrid.retrieve" in w and "участник 3" in w for w in warnings)
-    assert not any("mcp_client.McpClient" in w for w in warnings)   # McpClient реализован: отката нет
-    assert "⚠" in capsys.readouterr().err
+    assert callable(agent.retrieve)
+    assert isinstance(agent.tools, ToolsWithFallback)    # инструменты подключены с откатом на заглушку
 
 
 def test_retrieve_fallback_warns_once(capsys):
@@ -112,12 +103,31 @@ def test_index_without_sources_hints_fetch(tmp_path, monkeypatch, capsys):
     assert "make fetch" in capsys.readouterr().err
 
 
-def test_index_falls_back_to_stub(tmp_path, monkeypatch, capsys):
+def test_index_falls_back_to_stub_when_module_not_ready(tmp_path, monkeypatch, capsys):
+    import hopiumcode.indexing.build as build
+
+    def not_ready(*args, **kwargs):
+        raise NotImplementedError("участник 2")
+
     (tmp_path / "a.py").write_text("x = 1\n")
     monkeypatch.setenv("CG_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(build, "build_all", not_ready)
     assert cli.main(["index"]) == 0
     out = capsys.readouterr()
     assert "indexing.build.build_all" in out.err and "1" in out.out
+
+
+def test_index_reports_ollama_down(tmp_path, monkeypatch, capsys):
+    import hopiumcode.indexing.build as build
+
+    def down(*args, **kwargs):
+        raise ConnectionError("refused")
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    monkeypatch.setenv("CG_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(build, "build_all", down)
+    assert cli.main(["index"]) == 2
+    assert "ollama serve" in capsys.readouterr().err
 
 
 def test_path_mapper_to_target_root():
